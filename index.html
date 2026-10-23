@@ -136,8 +136,8 @@ function parseNum(v){
   const n=parseFloat(s); return isFinite(n)?n:NaN;
 }
 function round(n,d){ const f=Math.pow(10,d); return Math.round(n*f)/f; }
-function fmtMoney(n, cur){ if(!isFinite(n)) return "–"; try{ return n.toLocaleString("es-ES",{style:"currency",currency:cur||"EUR",minimumFractionDigits:(cur==="JPY"||cur==="TWD")?0:2,maximumFractionDigits:(cur==="JPY"||cur==="TWD")?0:2}); }catch(e){ return n.toFixed(2)+" "+(cur||"EUR"); } }
-function fmtUnitPrice(n, basis, unitName){ if(!isFinite(n)) return "–"; const per = basis==="unit" ? (unitName||"unit") : basis; const dec = n<0.5?3:2; /* small unit prices (per egg, per roll) need the third decimal */ return n.toLocaleString("es-ES",{minimumFractionDigits:dec,maximumFractionDigits:dec})+" €/"+per; }
+function fmtMoney(n, cur){ if(typeof n!=="number" || !Number.isFinite(n)) return "–"; try{ return n.toLocaleString("es-ES",{style:"currency",currency:cur||"EUR",minimumFractionDigits:(cur==="JPY"||cur==="TWD")?0:2,maximumFractionDigits:(cur==="JPY"||cur==="TWD")?0:2}); }catch(e){ return n.toFixed(2)+" "+(cur||"EUR"); } }
+function fmtUnitPrice(n, basis, unitName){ if(typeof n!=="number" || !Number.isFinite(n)) return "–";   /* missing unit price (size unknown) */ const per = basis==="unit" ? (unitName||"unit") : basis; const dec = n<0.5?3:2; /* small unit prices (per egg, per roll) need the third decimal */ return n.toLocaleString("es-ES",{minimumFractionDigits:dec,maximumFractionDigits:dec})+" €/"+per; }
 
 /* ---------- quantities ---------- */
 const UNIT_TO = { g:["kg",0.001], kg:["kg",1], mg:["kg",1e-6], ml:["L",0.001], cl:["L",0.01], l:["L",1], L:["L",1], unit:["unit",1], u:["unit",1] };
