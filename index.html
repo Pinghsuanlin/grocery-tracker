@@ -113,6 +113,11 @@ table.t2 td.n{text-align:right;font-family:var(--price);font-stretch:85%;font-we
 .banner{background:var(--surface);border:1px solid var(--line);border-left:6px solid var(--expensive);border-radius:14px;padding:12px 14px;margin:10px 0}
 .banner p{margin:4px 0 8px;font-size:14px;color:var(--muted)}
 .photo{max-width:100%;border-radius:10px;display:block;margin-top:8px}
+.linkbtn{border:0;background:none;color:var(--accent);font-weight:600;padding:0;font-size:inherit;text-decoration:underline;text-underline-offset:2px;min-height:28px;text-align:left}
+.checkrow{display:flex;gap:8px;align-items:center;min-height:46px;font-size:15px}
+.checkrow input{width:22px;height:22px}
+details.more{margin-top:12px} details.more summary{font-weight:600;min-height:36px;display:flex;align-items:center;cursor:pointer}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
 .userswitch{display:flex;background:var(--sunk);border-radius:12px;padding:3px;gap:3px}
 .userswitch button{flex:1;border:0;background:transparent;border-radius:9px;padding:8px 10px;font-weight:600;font-size:14px;color:var(--muted)}
 .userswitch button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
@@ -124,7 +129,7 @@ table.t2 td.n{text-align:right;font-family:var(--price);font-stretch:85%;font-we
 <div id="barhost"></div>
 <script>
 /*CORE-START*/
-const LOG_HEADER = "id,date,store,item,product,pack_count,pack_size,pack_unit,packs,weight,price_paid,currency,rate,price_eur,qty_basis,unit_price_eur,promo,person,source,photo,notes";
+const LOG_HEADER = "id,date,store,item,product,brand,own_label,pack_count,pack_size,pack_unit,packs,weight,price_paid,currency,rate,price_eur,qty_basis,unit_price_eur,promo,person,source,photo,notes,value";
 
 /* ---------- numbers & formatting ---------- */
 // Accepts "2,99", "2.99", "1.234,56", "1,234.56", "€ 3", "3 €"
@@ -292,13 +297,14 @@ function matchItem(name, items, remembered){
   let best=null;
   const consider=(id,score)=>{ if(!best || score>best.score+1e-9) best={item:id, score, how:"guess"}; };
   for(const it of items){
+    if(it.kind==="type") continue;   /* a receipt line is always a specific item, never a whole type */
     const labels=[[it.es,1],[it.en,0.9],...((it.alias||[]).map(a=>[a,1]))];
     for(const [label,w] of labels){
       const itT=itemTokens(label); if(!itT.length) continue;
       let hit=0, hits=0, pos=[];
       for(const a of itT){
         let wgt=0, at=-1;
-        rt.forEach((b,i)=>{ const v = b===a ? 1 : (b.length>=3 && a.startsWith(b)) ? 0.7 : (a.length>=4 && b.startsWith(a)) ? 0.9 : 0; if(v>wgt){ wgt=v; at=i; } });
+        rt.forEach((b,i)=>{ const v = b===a ? 1 : (b.length>=3 && a.startsWith(b)) ? 0.7 : (a.length>=4 && b.startsWith(a)) ? (b.length-a.length<=2 ? 0.9 : 0.3) : 0; if(v>wgt){ wgt=v; at=i; } });   /* "AGUACATES" ≠ "AGUA": only plural endings count */
         if(wgt){ hit+=wgt; hits++; pos.push(at); }
       }
       if(!hits) continue;
@@ -339,6 +345,37 @@ function csvCell(v){ v=v==null?"":String(v); return /[",\n\r]/.test(v)?'"'+v.rep
 function csvLine(values){ return values.map(csvCell).join(","); }
 function rowToLine(o){ return csvLine(LOG_HEADER.split(",").map(c=>o[c]??"")); }
 function localISO(d=new Date()){ const z=n=>String(n).padStart(2,"0"); return d.getFullYear()+"-"+z(d.getMonth()+1)+"-"+z(d.getDate()); }
+/* ---------- brands and own labels (marca blanca) ---------- */
+const OWN_LABELS=["Hacendado","Deliplus","Bosque Verde","Compy","Alipende","Auchan","Carrefour","Dia","BM","Eroski","Consum","Milbona","Pikok","Solcrem","Cien","W5","Milsani","Kirkland","Lexman","Ifa Eliges","Selex"];
+const BRANDS=["Garofalo","Florette","Kikkoman","Danone","Activia","Danacol","Philadelphia","Fairy","Colón","Renova","Ortiz","Jordans","Kellogg's","Nomen","Carmencita","Marcilla","Arteiñaki","Scoiattolo","Président","El Pastor","Cerrato","Casa Azzurra","La Estrella","St Michel","Islos","El Caserío","La Huerta","Madrid Miel","Sanytol","Chimei","S&B","Sempio","Lee Kum Kee","Kangfu","Jiajiashan","Central Lechera Asturiana","Pascual","Puleva","Kaiku","Alpro","Barilla","Gallo","Calvo","Isabel","Cuétara","Nestlé","Nescafé","Hero","Coca-Cola","Mahou","Font Vella","Bezoya","Colgate","Ariel","Skip","Dixan","Scottex","Kleenex","Tramontina","Taurus","Masterchef","Glasslock","Crop's","Alvalle","Tello","Caysan","Ribera","SK","Modo","Queen","Florida","Ybarra","Carbonell","La Masía","Borges","Koipe"];
+const BRAND_ALIASES={"KS":"Kirkland","KIRKLAND SIGNATURE":"Kirkland","HACEND":"Hacendado","AUCH":"Auchan","KELLO":"Kellogg's","KELLOGG":"Kellogg's","LKK":"Lee Kum Kee","PHILAD":"Philadelphia","PRESIDENT":"Président","COLON":"Colón","CROPS":"Crop's","S B":"S&B","ST MICHEL":"St Michel","ST.MICHEL":"St Michel"};
+function isOwnLabel(brand){ const f=fold(brand); return OWN_LABELS.some(b=>fold(b)===f); }
+/* Find a brand in a product name: known own labels, known brands, and common receipt abbreviations. */
+function detectBrand(product){
+  const t=" "+fold(product).replace(/[^A-Z0-9&' ]+/g," ").replace(/\s+/g," ")+" ";
+  for(const [k,v] of Object.entries(BRAND_ALIASES)){ if(t.includes(" "+k+" ")||t.startsWith(" "+k+" ")) return {brand:v, own:isOwnLabel(v)}; }
+  for(const b of [...OWN_LABELS,...BRANDS].sort((a,b)=>b.length-a.length)){
+    const f=fold(b).replace(/[^A-Z0-9&' ]+/g," ").trim(); if(f.length<2) continue;
+    if(t.includes(" "+f+" ")) return {brand:b, own:isOwnLabel(b)};
+  }
+  return null;
+}
+/* ---------- types and subtypes ---------- */
+function typeOf(item, items){ return item && item.type ? items.find(x=>x.id===item.type)||null : (item && item.kind==="type" ? item : null); }
+function familyIds(typeId, items){ return [typeId, ...items.filter(x=>x.type===typeId).map(x=>x.id)]; }
+/* Prices to judge against: the same subtype when it has 3+ prices; otherwise the whole type. */
+function historyFor(itemId, items, purchases, exceptId){
+  const it=items.find(x=>x.id===itemId); const ok=p=>p.id!==exceptId && p.unit_price_eur>0;
+  const own=purchases.filter(p=>p.item===itemId && ok(p)).map(p=>p.unit_price_eur);
+  if(!it) return {values:own, scope:"item"};
+  if(it.kind==="type"){ const fam=familyIds(it.id, items); return {values:purchases.filter(p=>fam.includes(p.item)&&ok(p)).map(p=>p.unit_price_eur), scope:"type", type:it}; }
+  if(it.type && own.length<3){
+    const ty=items.find(x=>x.id===it.type); const fam=familyIds(it.type, items);
+    const all=purchases.filter(p=>fam.includes(p.item)&&ok(p)).map(p=>p.unit_price_eur);
+    if(all.length>own.length) return {values:all, scope:"type", type:ty, own:own.length};
+  }
+  return {values:own, scope:"item"};
+}
 /*CORE-END*/
 /* ===================== STORAGE (own prefix, separate from the gym app) ===================== */
 const PFX="gr_";
@@ -393,7 +430,7 @@ async function ghImage(path){
 const imgMem={};
 
 /* ===================== SYNC ===================== */
-function numRow(p){ for(const k of ["pack_count","pack_size","packs","weight","price_paid","rate","price_eur","qty_basis","unit_price_eur"]) p[k]=p[k]===""||p[k]==null?null:parseNum(p[k]); return p; }
+function numRow(p){ for(const k of ["pack_count","pack_size","packs","weight","price_paid","rate","price_eur","qty_basis","unit_price_eur","value"]) p[k]=p[k]===""||p[k]==null?null:parseNum(p[k]); return p; }
 async function sync(){
   if(!cfg.token) return;
   try{
@@ -428,9 +465,9 @@ async function rewritePurchases(mutate, message){
   S.purchases=csvParse(text).map(numRow); saveCache();
 }
 async function saveJson(path, obj, message){ await ghUpdate(path, ()=>JSON.stringify(obj,null,1)+"\n", message); }
-async function addStore(name){
+async function addStore(name, kind){
   const id="own_"+fold(name).toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"").slice(0,30)+"_"+Date.now().toString(36).slice(-3);
-  const st={id, name, type:"own", keywords:[fold(name)]};
+  const st={id, name, type:kind||"own", keywords:[fold(name)]};
   await ghUpdate("stores.json", t=>{ const d=t?JSON.parse(t):{version:1,stores:[]}; d.stores.push(st); return JSON.stringify(d,null,1)+"\n"; }, `Add shop ${name}`);
   S.stores.push(st); saveCache(); return st;
 }
@@ -455,6 +492,8 @@ async function uploadPhoto(file, id){
 
 /* ===================== CURRENCIES ===================== */
 const CURRENCIES=["EUR","USD","GBP","TWD","JPY"];
+const SHOP_KINDS={supermarket:"Supermarket",discount:"Supermarket",hypermarket:"Supermarket",wholesale:"Wholesale",online:"Online",rescue:"Food-rescue app",market:"Market",greengrocer:"Speciality shop",butcher:"Speciality shop",fishmonger:"Speciality shop",diy:"DIY & home",home:"DIY & home",own:"Shop"};
+const NEW_SHOP_KINDS=[["supermarket","Supermarket"],["online","Online"],["market","Market"],["greengrocer","Speciality shop"],["rescue","Food-rescue app"],["diy","DIY & home"]];
 /* 1 EUR = rate × currency, on the purchase date (daily reference rates; earliest 2024-03-02) */
 async function rateFor(cur, date){
   if(cur==="EUR") return 1;
@@ -473,7 +512,14 @@ const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const itemById=id=>S.items.find(x=>x.id===id);
 const storeById=id=>S.stores.find(x=>x.id===id);
 const storeName=id=>(storeById(id)||{}).name||id||"";
-function itemLabel(it){ return it? it.en : ""; }
+function itemLabel(it){ return disp(it); }
+const isType=it=>!!(it&&it.kind==="type");
+/* "Milk · Whole" for a subtype, the plain name otherwise */
+function disp(it){ if(!it) return ""; const t=it.type?itemById(it.type):null; return t? `${t.en} · ${it.sub?it.sub.en:it.en}` : it.en; }
+function H(itemId, exceptId){ return historyFor(itemId, S.items.filter(x=>!x.nocompare), S.purchases, exceptId); }
+function brandOf(p){ if(p.brand) return p.brand; const d=detectBrand(p.product||""); return d?d.brand:""; }
+function ownOf(p){ const o=String(p.own_label??""); if(o==="1"||o==="true") return true; if(o==="0"||o==="false") return false; const b=brandOf(p); return b?isOwnLabel(b):false; }
+const comparable=p=>{ const it=itemById(p.item); return !!it && !it.nocompare && p.unit_price_eur>0; };
 function unitWord(it){ return it&&it.basis==="unit" ? ((it.unit&&it.unit.en)||"unit") : (it?it.basis:""); }
 function purchasesOf(itemId, exceptId){ return S.purchases.filter(p=>p.item===itemId && p.id!==exceptId && p.unit_price_eur>0); }
 function niceDate(iso){ if(!iso) return ""; return new Date(iso+"T12:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short",year: iso.slice(0,4)===localISO().slice(0,4)?undefined:"numeric"}); }
@@ -482,8 +528,9 @@ function toast(msg){ document.querySelectorAll(".toast").forEach(x=>x.remove());
 function setBar(h){ $("#barhost").innerHTML = h?`<div class="bar"><div class="wrap">${h}</div></div>`:""; }
 function searchItems(q){
   const f=fold(q).trim(); if(!f) return [];
-  const sc=it=>{ const hay=[it.en,it.es,it.zh,...(it.alias||[])].map(fold); let s=0; for(const h of hay){ if(h===f) s=Math.max(s,3); else if(h.startsWith(f)) s=Math.max(s,2); else if(h.includes(f)) s=Math.max(s,1); } return s; };
-  return S.items.map(it=>[it,sc(it)]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]||a[0].en.localeCompare(b[0].en)).map(x=>x[0]).slice(0,30);
+  const sc=it=>{ const t=it.type?itemById(it.type):null; const hay=[it.en,it.es,it.zh,...(it.alias||[]),...(t?[t.en+" "+(it.sub?it.sub.en:""),t.es+" "+(it.sub?it.sub.es:""),t.zh]:[])].map(fold);
+    let s=0; for(const h of hay){ if(h===f) s=Math.max(s,3); else if(h.startsWith(f)) s=Math.max(s,2); else if(h.includes(f)) s=Math.max(s,1); } return s+(isType(it)&&s?0.5:0); };
+  return S.items.map(it=>[it,sc(it)]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]||disp(a[0]).localeCompare(disp(b[0]))).map(x=>x[0]).slice(0,40);
 }
 function recentStores(){ const seen=new Set(), out=[]; for(const p of S.purchases.slice().reverse()){ if(p.store && !seen.has(p.store)){ seen.add(p.store); out.push(p.store); } } return out; }
 function storeOptions(sel){
@@ -496,12 +543,13 @@ function storeOptions(sel){
 /* f: {item, mode:"pack"|"weight", pack_count, pack_size, pack_unit, packs, price_pack, promo, pct, weight, weight_unit, per_kg, total, currency, rate} */
 function computeForm(f){
   const it=itemById(f.item); if(!it) return {ok:false, why:"Choose an item"};
+  if(it.nocompare){ const paid=f.price_pack; if(!(paid>0)) return {ok:false, why:"Enter what you paid"}; const rate=f.currency==="EUR"||!f.currency?1:f.rate; if(!(rate>0)) return {ok:false, why:`Exchange rate for ${f.currency} needed`};
+    return {ok:true, it, qty:1, paid:round(paid,2), eur:round(paid/rate,4), up:paid/rate, rate, value: f.value>0? f.value/rate : null}; }
   let qty, paid;
   if(f.mode==="weight"){
     const wu = it.basis==="L" ? (f.weight_unit||"L") : (f.weight_unit||"kg");
     qty=toBasis(f.weight, wu, it.basis);
-    const per = f.per_kg>0 ? f.per_kg : NaN;
-    paid = f.total>0 ? f.total : (per>0 && f.weight>0 ? round(toBasis(f.weight,wu,it.basis==="unit"?"kg":it.basis)*per,2) : NaN);
+    paid = f.total>0 ? f.total : (f.per_kg>0 && f.weight>0 ? round(toBasis(f.weight,wu,it.basis==="unit"?"kg":it.basis)*f.per_kg,2) : NaN);
   } else {
     qty=quantityInBasis({pack_count:f.pack_count, pack_size:f.pack_size, pack_unit:f.pack_unit, packs:f.packs}, it.basis);
     paid = f.price_pack>0 ? round(f.price_pack*(f.packs>0?f.packs:1)*promoFactor(f.promo,f.pct),2) : NaN;
@@ -510,22 +558,27 @@ function computeForm(f){
   if(!(paid>0)) return {ok:false, why:"Enter the price"};
   const rate = f.currency==="EUR"||!f.currency ? 1 : f.rate;
   if(!(rate>0)) return {ok:false, why:`Exchange rate for ${f.currency} needed`};
-  const eur=round(paid/rate,4); const up=eur/qty;
-  return {ok:true, it, qty, paid, eur, up, rate};
+  const eur=round(paid/rate,4); return {ok:true, it, qty, paid, eur, up:eur/qty, rate};
 }
-function priceTagHTML(c, history, opts={}){
-  const it=c.it; const v=verdict(c.up, history);
-  const s=v.stats||{};
-  const bestP = history.length ? S.purchases.filter(p=>p.item===it.id && p.unit_price_eur>0 && p.id!==opts.exceptId).sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0] : null;
+function priceTagHTML(c, _unused, opts={}){
+  const it=c.it;
+  if(it.nocompare){
+    const saved=c.value>0? c.value-c.eur : null;
+    return `<div class="pricetag" aria-live="polite">${saved>0?`<span class="sticker k-great">Saved ${esc(fmtMoney(saved))}</span>`:""}<div class="what">${esc(disp(it))}</div>
+      <div class="big">${esc(fmtMoney(c.paid, opts.currency||"EUR"))}</div><div class="note">${saved>0?`Worth ${esc(fmtMoney(c.value))} in the shop's app. `:""}Surprise bags aren't part of the price comparisons.</div></div>`;
+  }
+  const h=H(it.id, opts.exceptId); const v=verdict(c.up, h.values); const s=v.stats||{};
+  const fam = h.scope==="type" ? familyIds(h.type.id, S.items) : [it.id];
+  const bestP = h.values.length ? S.purchases.filter(p=>fam.includes(p.item) && comparable(p) && p.id!==opts.exceptId).sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0] : null;
+  const scopeNote = h.scope==="type" && h.type && h.type.id!==it.id ? ` Compared with all ${h.type.en.toLowerCase()}${h.own?` (only ${h.own} ${esc((it.sub?it.sub.en:it.en).toLowerCase())} price${h.own===1?"":"s"} so far)`:""}.` : "";
   return `<div class="pricetag" aria-live="polite">
     <span class="sticker k-${v.kind}">${esc(v.label)}</span>
-    <div class="what">${esc(it.en)}${it.zh?` · ${esc(it.zh)}`:""}</div>
+    <div class="what">${esc(disp(it))}${it.zh?` · ${esc(it.zh)}`:""}</div>
     <div class="big">${esc(fmtMoney(c.paid, opts.currency||"EUR"))}</div>
     <div class="unit">${esc(fmtUnitPrice(c.up, it.basis, unitWord(it)))}${opts.currency&&opts.currency!=="EUR"?` <span class="small">(${esc(fmtMoney(c.eur,"EUR"))})</span>`:""}</div>
-    <div class="note">${esc(v.text)}${bestP?` Best: ${esc(fmtUnitPrice(bestP.unit_price_eur,it.basis,unitWord(it)))} at ${esc(storeName(bestP.store))}, ${esc(niceDate(bestP.date))}.`:""}${s.n>=2?` Typical: ${esc(fmtUnitPrice(s.median,it.basis,unitWord(it)))}.`:""}</div>
+    <div class="note">${esc(v.text)}${esc(scopeNote)}${bestP?` Best: ${esc(fmtUnitPrice(bestP.unit_price_eur,it.basis,unitWord(it)))} at ${esc(storeName(bestP.store))}${fam.length>1&&bestP.item!==it.id?` (${esc(disp(itemById(bestP.item)))})`:""}, ${esc(niceDate(bestP.date))}.`:""}${s.n>=2?` Typical: ${esc(fmtUnitPrice(s.median,it.basis,unitWord(it)))}.`:""}</div>
   </div>`;
 }
-
 /* ===================== ROUTER ===================== */
 function render(){
   const h=location.hash.replace(/^#/,"")||"home"; const parts=h.split("/"); const view=parts[0]; const arg=parts[1]!==undefined?decodeURIComponent(parts[1]):undefined;
@@ -571,21 +624,25 @@ function renderHome(){
   <div class="links"><button class="btn" data-go="stores">Compare shops</button><button class="btn" data-go="items">All items</button></div>`;
 }
 function purchaseLi(p){
-  const it=itemById(p.item); const v=verdict(p.unit_price_eur, purchasesOf(p.item,p.id).map(x=>x.unit_price_eur));
-  return `<button class="li" data-go="item/${encodeURIComponent(p.item)}"><span><span class="dot k-${v.kind==="none"?"typical":v.kind}" aria-hidden="true"></span><b>${esc(it?it.en:p.item)}</b> <span class="zh">${esc(it?it.zh:"")}</span><br><span class="sub">${esc(storeName(p.store))} · ${esc(niceDate(p.date))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span>
-   <span class="r">${esc(fmtUnitPrice(p.unit_price_eur, it?it.basis:"unit", unitWord(it)))}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`;
+  const it=itemById(p.item); const b=brandOf(p);
+  const v= it&&it.nocompare ? {kind:"typical"} : verdict(p.unit_price_eur, H(p.item,p.id).values);
+  return `<button class="li" data-go="item/${encodeURIComponent(p.item)}"><span><span class="dot k-${v.kind==="none"||v.kind==="new"?"typical":v.kind}" aria-hidden="true"></span><b>${esc(it?disp(it):p.item)}</b> <span class="zh">${esc(it?it.zh:"")}</span><br><span class="sub">${esc(storeName(p.store))} · ${esc(niceDate(p.date))}${b?` · ${esc(b)}${ownOf(p)?` <span class="tagpill">own label</span>`:""}`:""}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span>
+   <span class="r">${it&&it.nocompare?"":esc(fmtUnitPrice(p.unit_price_eur, it?it.basis:"unit", unitWord(it)))}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`;
 }
 function itemLi(it){
-  const ps=purchasesOf(it.id); const s=priceStats(ps.map(p=>p.unit_price_eur));
-  const best=ps.sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0];
-  return `<button class="li" data-go="item/${encodeURIComponent(it.id)}"><span><b>${esc(it.en)}</b> <span class="zh">${esc(it.zh)}</span><br><span class="sub">${esc(it.es)}</span></span>
-   <span class="r">${s.n?esc(fmtUnitPrice(s.best,it.basis,unitWord(it))):"–"}<small>${best?esc("best · "+storeName(best.store)):"no prices yet"}</small></span></button>`;
+  const fam = isType(it) ? familyIds(it.id, S.items) : [it.id];
+  const ps=S.purchases.filter(p=>fam.includes(p.item) && comparable(p)); const s=priceStats(ps.map(p=>p.unit_price_eur));
+  const best=ps.sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0]; const nSub=isType(it)?S.items.filter(x=>x.type===it.id).length:0;
+  return `<button class="li" data-go="item/${encodeURIComponent(it.id)}"><span><b>${esc(disp(it))}</b> <span class="zh">${esc(it.zh)}</span><br><span class="sub">${esc(it.es)}${nSub?` · ${nSub} types`:""}</span></span>
+   <span class="r">${s.n?esc(fmtUnitPrice(s.best,it.basis,unitWord(it))):it.nocompare?"":"–"}<small>${best?esc("best · "+storeName(best.store)):it.nocompare?"not compared":"no prices yet"}</small></span></button>`;
 }
-
 /* ===================== CHECK / LOG / EDIT FORM ===================== */
 let F=null;   // the form being filled
-function blankForm(itemId){ return {item:itemId||"", store:"", date:localISO(), product:"", mode:"pack", pack_count:1, pack_size:"", pack_unit:"", packs:1, price_pack:"", promo:"", pct:"", weight:"", weight_unit:"", per_kg:"", total:"", currency:cfg.currency||"EUR", rate:1, notes:"", photo:"", photoFile:null, id:null}; }
+function blankForm(itemId){ return {item:itemId||"", store:"", date:localISO(), product:"", brand:"", own:"", mode:"pack", pack_count:1, pack_size:"", pack_unit:"", packs:1, price_pack:"", promo:"", pct:"", weight:"", weight_unit:"", per_kg:"", total:"", value:"", currency:cfg.currency||"EUR", rate:1, notes:"", photo:"", photoFile:null, id:null}; }
 function defaultUnit(it){ return !it?"":it.basis==="unit"?"unit":it.basis==="L"?"ml":"g"; }
+function storeBtn(sel, act){ const st=storeById(sel); return `<button class="pickbtn ${st?"set":""}" data-act="${act}">${st?`${esc(st.name)} <span class="zh">${esc(SHOP_KINDS[st.type]||"")}</span>`:"Choose or add a shop…"}</button>`; }
+function brandList(itemId){ const fam=new Set([itemId]); const it=itemById(itemId); if(it&&it.type) familyIds(it.type,S.items).forEach(x=>fam.add(x)); const seen=new Set();
+  return [...S.purchases.filter(p=>fam.has(p.item)).map(brandOf), ...OWN_LABELS].filter(b=>b&&!seen.has(b)&&seen.add(b)); }
 function renderForm(kind, arg){
   if(kind==="edit"){ const p=S.purchases.find(x=>x.id===arg); if(!p){ location.hash="home"; return; } if(!F||F.id!==p.id) F=formFromPurchase(p); }
   else if(!F || F._kind!==kind || (arg && F.item!==arg && !F._carry)){ F=blankForm(arg); }
@@ -594,15 +651,22 @@ function renderForm(kind, arg){
   if(it && !F.pack_unit) F.pack_unit=defaultUnit(it);
   const title = kind==="check"?"Check a price":kind==="edit"?"Edit purchase":"Log a purchase";
   const unitOpts = it&&it.basis==="unit" ? [["unit",unitWord(it)+"s"]] : it&&it.basis==="L" ? [["ml","ml"],["cl","cl"],["L","L"]] : [["g","g"],["kg","kg"]];
+  const own = F.own==="1" || (F.own===""&&F.brand&&isOwnLabel(F.brand));
   $("#app").innerHTML=`${topbar(title, kind==="edit"?"item/"+encodeURIComponent(F.item):"home")}
   <div class="card">
     <label class="f" style="margin-top:0">Item</label>
-    <button class="pickbtn ${it?"set":""}" data-act="pickitem">${it?`${esc(it.en)} <span class="zh">${esc(it.zh)} · ${esc(it.es)}</span>`:"Choose an item…"}</button>
-    ${kind!=="check"?`<div class="row2"><div><label class="f" for="f_store">Shop</label><select class="t" id="f_store" data-f="store">${storeOptions(F.store)}</select></div><div><label class="f" for="f_date">Date</label><input class="t" id="f_date" type="date" data-f="date" value="${esc(F.date)}" max="${localISO()}"></div></div>
-      <label class="f" for="f_product">Product or brand <span class="sub">(optional)</span></label><input class="t" id="f_product" data-f="product" value="${esc(F.product)}" placeholder="e.g. Hacendado, Carrefour Bio">`:
-      `<label class="f" for="f_store">Shop <span class="sub">(optional)</span></label><select class="t" id="f_store" data-f="store">${storeOptions(F.store)}</select>`}
+    <button class="pickbtn ${it?"set":""}" data-act="pickitem">${it?`${esc(disp(it))} <span class="zh">${esc(it.zh)} · ${esc(it.es)}</span>`:"Choose or add an item…"}</button>
+    <label class="f">Shop${kind==="check"?` <span class="sub">(optional)</span>`:""}</label>${storeBtn(F.store,"pickstore")}
+    ${kind!=="check"?`<label class="f" for="f_date">Date</label><input class="t" id="f_date" type="date" data-f="date" value="${esc(F.date)}" max="${localISO()}">`:""}
+    ${it&&!it.nocompare?`<div class="row2"><div><label class="f" for="f_brand">Brand <span class="sub">(optional)</span></label><input class="t" id="f_brand" data-f="brand" list="brandlist" value="${esc(F.brand)}" placeholder="e.g. Hacendado" autocomplete="off"><datalist id="brandlist">${brandList(F.item).map(b=>`<option value="${esc(b)}">`).join("")}</datalist></div>
+      <div><label class="f">&nbsp;</label><label class="checkrow"><input type="checkbox" id="f_own" ${own?"checked":""}> Own label (marca blanca)</label></div></div>`:""}
+    ${kind!=="check"&&it&&!it.nocompare?`<label class="f" for="f_product">Product name <span class="sub">(optional)</span></label><input class="t" id="f_product" data-f="product" value="${esc(F.product)}" placeholder="as on the label or receipt">`:""}
   </div>
-  ${it?`<div class="card">
+  ${it&&it.nocompare?`<div class="card">
+    <div class="row2"><div><label class="f" for="f_price" style="margin-top:0">You paid</label><input class="t" id="f_price" data-f="price_pack" inputmode="decimal" value="${esc(F.price_pack)}" placeholder="4,99"></div>
+      <div><label class="f" for="f_value" style="margin-top:0">Value shown <span class="sub">(optional)</span></label><input class="t" id="f_value" data-f="value" inputmode="decimal" value="${esc(F.value)}" placeholder="15,00"></div></div>
+    <p class="sub">Too Good To Go and similar apps show what the bag is worth. The app tracks your savings and keeps bags out of the price comparisons.</p></div>`
+  : it?`<div class="card">
     <div class="seg" role="group" aria-label="How it's sold"><button data-act="mode" data-v="pack" aria-pressed="${F.mode==="pack"}">Pack or piece</button><button data-act="mode" data-v="weight" aria-pressed="${F.mode==="weight"}">${it.basis==="L"?"Loose (by litre)":"By weight"}</button></div>
     ${F.mode==="pack"?`
       <label class="f">${it.basis==="unit"?`What's in one pack`:`Size of one pack`}</label>
@@ -617,21 +681,20 @@ function renderForm(kind, arg){
         <div><label class="f" for="f_wu">Unit</label><select class="t" id="f_wu" data-f="weight_unit">${(it.basis==="L"?[["L","L"],["ml","ml"]]:[["kg","kg"],["g","g"]]).map(([v,l])=>`<option value="${v}" ${(F.weight_unit||(it.basis==="L"?"L":"kg"))===v?"selected":""}>${l}</option>`).join("")}</select></div></div>
       <div class="row2"><div><label class="f" for="f_pk">Price per ${it.basis==="L"?"L":"kg"}</label><input class="t" id="f_pk" data-f="per_kg" inputmode="decimal" value="${esc(F.per_kg)}" placeholder="2,05"></div>
         <div><label class="f" for="f_tot">or total paid</label><input class="t" id="f_tot" data-f="total" inputmode="decimal" value="${esc(F.total)}" placeholder="1,77"></div></div>`}
-    <div class="row2"><div><label class="f" for="f_cur">Currency</label><select class="t" id="f_cur" data-f="currency">${CURRENCIES.map(c=>`<option ${F.currency===c?"selected":""}>${c}</option>`).join("")}</select></div>
-      ${F.currency!=="EUR"?`<div><label class="f" for="f_rate">1 € = ? ${esc(F.currency)}</label><input class="t" id="f_rate" data-f="rate" inputmode="decimal" value="${esc(F.rate||"")}" placeholder="looking up…"></div>`:"<span></span>"}</div>
-    ${F.currency!=="EUR"?`<p class="sub small">Converted at the reference rate for the purchase date. Edit it if your card used a different rate.</p>`:""}
-  </div>
+  </div>`:`<p class="empty">Choose an item, or type a new one, to enter its price.</p>`}
+  ${it?`<div class="card"><div class="row2"><div><label class="f" for="f_cur" style="margin-top:0">Currency</label><select class="t" id="f_cur" data-f="currency">${CURRENCIES.map(c=>`<option ${F.currency===c?"selected":""}>${c}</option>`).join("")}</select></div>
+      ${F.currency!=="EUR"?`<div><label class="f" for="f_rate" style="margin-top:0">1 € = ? ${esc(F.currency)}</label><input class="t" id="f_rate" data-f="rate" inputmode="decimal" value="${esc(F.rate||"")}" placeholder="looking up…"></div>`:"<span></span>"}</div>
+    ${F.currency!=="EUR"?`<p class="sub small">Converted at the reference rate for the purchase date. Edit it if your card used a different rate.</p>`:""}</div>`:""}
   <div id="f_result"></div>
-  ${kind!=="check"?`<div class="card"><label class="f" for="f_notes" style="margin-top:0">Notes</label><input class="t" id="f_notes" data-f="notes" value="${esc(F.notes)}">
-    <label class="f" for="f_photo">Photo <span class="sub">(optional: label or receipt)</span></label><input id="f_photo" type="file" accept="image/*" capture="environment">${F.photo?`<p class="sub small">Saved photo: ${esc(F.photo)}</p>`:""}</div>`:""}`
-  :`<p class="empty">Choose an item to enter its price.</p>`}`;
+  ${kind!=="check"&&it?`<div class="card"><label class="f" for="f_notes" style="margin-top:0">Notes</label><input class="t" id="f_notes" data-f="notes" value="${esc(F.notes)}">
+    <label class="f" for="f_photo">Photo <span class="sub">(optional: label or receipt)</span></label><input id="f_photo" type="file" accept="image/*" capture="environment">${F.photo?`<p class="sub small">Saved photo: ${esc(F.photo)}</p>`:""}</div>`:""}`;
   updateResult();
   if(F.currency!=="EUR" && !(F.rate>0)) lookupRate();
   setBar(kind==="check" ? `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="checktolog">Log this purchase</button>`
        : kind==="edit" ? `<button class="btn danger" data-act="delpurchase">Delete</button><button class="btn primary" data-act="savepurchase">Save changes</button>`
        : `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="savepurchase">Save purchase</button>`);
 }
-function formFields(){ const f={...F}; for(const k of ["pack_count","pack_size","packs","price_pack","pct","weight","per_kg","total","rate"]) f[k]=parseNum(F[k]); return f; }
+function formFields(){ const f={...F}; for(const k of ["pack_count","pack_size","packs","price_pack","pct","weight","per_kg","total","rate","value"]) f[k]=parseNum(F[k]); return f; }
 function updateResult(){
   const box=$("#f_result"); if(!box) return;
   const c=computeForm(formFields());
@@ -646,17 +709,22 @@ async function lookupRate(){
 }
 function formFromPurchase(p){
   const it=itemById(p.item)||{};
-  return {...blankForm(p.item), id:p.id, store:p.store, date:p.date, product:p.product||"", mode:p.weight>0?"weight":"pack", pack_count:p.pack_count||1, pack_size:p.pack_size||"", pack_unit:p.pack_unit||defaultUnit(it), packs:p.packs||1,
-    price_pack: p.weight>0?"": round(p.price_paid/((p.packs||1)*promoFactor(String(p.promo||"").startsWith("pct")?"pct":p.promo, parseNum(String(p.promo||"").split(":")[1]))),2),
-    promo:String(p.promo||"").startsWith("pct")?"pct":(p.promo||""), pct:String(p.promo||"").startsWith("pct")?String(p.promo).split(":")[1]:"",
-    weight:p.weight||"", weight_unit: it.basis==="L"?"L":"kg", total:p.weight>0?p.price_paid:"", currency:p.currency||"EUR", rate:p.rate||1, notes:p.notes||"", photo:p.photo||""};
+  const pc=String(p.promo||""); const isPct=pc.startsWith("pct");
+  return {...blankForm(p.item), id:p.id, store:p.store, date:p.date, product:p.product||"", brand:p.brand||"", own:String(p.own_label??""), mode:p.weight>0?"weight":"pack", pack_count:p.pack_count||1, pack_size:p.pack_size||"", pack_unit:p.pack_unit||defaultUnit(it), packs:p.packs||1,
+    price_pack: it.nocompare ? p.price_paid : (p.weight>0?"": round(p.price_paid/((p.packs||1)*promoFactor(isPct?"pct":p.promo, parseNum(pc.split(":")[1]))),2)),
+    promo:isPct?"pct":(["2x1","3x2","2nd50","2nd70"].includes(pc)?pc:""), pct:isPct?pc.split(":")[1]:"",
+    weight:p.weight||"", weight_unit: it.basis==="L"?"L":"kg", total:p.weight>0?p.price_paid:"", value:p.value||"", currency:p.currency||"EUR", rate:p.rate||1, notes:p.notes||"", photo:p.photo||""};
 }
 function rowFromForm(c, extra={}){
-  const f=formFields();
-  return {id:F.id||newId(), date:F.date||localISO(), store:F.store, item:F.item, product:F.product||"",
-    pack_count: F.mode==="pack"?(f.pack_count||1):"", pack_size: F.mode==="pack"&&c.it.basis!=="unit"?(f.pack_size||""):"", pack_unit: F.mode==="pack"?(F.pack_unit||defaultUnit(c.it)):"", packs: F.mode==="pack"?(f.packs||1):"",
-    weight: F.mode==="weight"? round(c.qty,3):"", price_paid:round(c.paid,2), currency:F.currency||"EUR", rate:c.rate===1?1:round(c.rate,6), price_eur:round(c.eur,2), qty_basis:round(c.qty,4),
-    unit_price_eur:round(c.up,4), promo: F.mode==="pack" ? (F.promo==="pct"?`pct:${f.pct||0}`:F.promo||"") : "", person:cfg.person, source:extra.source||"typed", photo:extra.photo||F.photo||"", notes:F.notes||""};
+  const f=formFields(); const ny=c.it.nocompare;
+  const det = !F.brand && F.product ? detectBrand(F.product) : null;
+  const brand = (F.brand||"").trim() || (det?det.brand:"");
+  const own = F.own==="1" ? 1 : F.own==="0" ? 0 : (brand && isOwnLabel(brand) ? 1 : "");
+  return {id:F.id||newId(), date:F.date||localISO(), store:F.store, item:F.item, product:F.product||"", brand, own_label:own,
+    pack_count: !ny&&F.mode==="pack"?(f.pack_count||1):"", pack_size: !ny&&F.mode==="pack"&&c.it.basis!=="unit"?(f.pack_size||""):"", pack_unit: !ny&&F.mode==="pack"?(F.pack_unit||defaultUnit(c.it)):"", packs: ny?1:F.mode==="pack"?(f.packs||1):"",
+    weight: !ny&&F.mode==="weight"? round(c.qty,3):"", price_paid:round(c.paid,2), currency:F.currency||"EUR", rate:c.rate===1?1:round(c.rate,6), price_eur:round(c.eur,2), qty_basis:round(c.qty,4),
+    unit_price_eur: ny?"":round(c.up,4), promo: !ny&&F.mode==="pack" ? (F.promo==="pct"?`pct:${f.pct||0}`:F.promo||"") : "", person:cfg.person, source:extra.source||"typed", photo:extra.photo||F.photo||"", notes:F.notes||"",
+    value: ny && f.value>0 ? round(f.value,2) : ""};
 }
 async function savePurchaseForm(){
   if(!F.store){ toast("Choose the shop."); return; }
@@ -681,23 +749,81 @@ let pickCb=null;
 function openPicker(cb, initial){
   pickCb=cb; closeSheet();
   const sh=document.createElement("div"); sh.className="sheet"; sh.id="picker"; sh.setAttribute("role","dialog"); sh.setAttribute("aria-label","Choose an item");
-  sh.innerHTML=`<div class="sheetcard"><div class="hd"><input class="t" id="pk_q" type="search" placeholder="Search: leche, milk, 牛奶…" value="${esc(initial||"")}" autocomplete="off"><button class="iconbtn" data-act="closesheet">Close</button></div><div id="pk_res" class="list"></div>
-    <p><button class="btn small" data-act="newitem">+ New item</button></p></div>`;
+  sh.innerHTML=`<div class="sheetcard"><div class="hd"><input class="t" id="pk_q" type="search" placeholder="Search or type a new item: leche, milk, 牛奶…" value="${esc(initial||"")}" autocomplete="off"><button class="iconbtn" data-act="closesheet">Close</button></div><div id="pk_res" class="list"></div></div>`;
   sh.addEventListener("click",e=>{ if(e.target===sh) closeSheet(); });
   document.body.appendChild(sh); pickerList(); $("#pk_q").focus();
 }
 function pickerList(){
-  const q=$("#pk_q").value; const res=q? searchItems(q) : (()=>{ const seen=new Set(); const out=[]; for(const p of S.purchases.slice().reverse()){ if(!seen.has(p.item)&&itemById(p.item)){ seen.add(p.item); out.push(itemById(p.item)); } } return out.slice(0,12); })();
-  $("#pk_res").innerHTML = res.length ? res.map(it=>`<button class="li" data-act="pick" data-id="${esc(it.id)}"><span><b>${esc(it.en)}</b> <span class="zh">${esc(it.zh)}</span><br><span class="sub">${esc(it.es)} · per ${esc(unitWord(it))}</span></span><span></span></button>`).join("")
-    : `<p class="empty">${q?"No match. Add it as a new item.":"Start typing in English, Spanish or 中文."}</p>`;
+  const q=$("#pk_q").value.trim();
+  const res=q? searchItems(q) : (()=>{ const seen=new Set(); const out=[]; for(const p of S.purchases.slice().reverse()){ const it=itemById(p.item); if(it&&!seen.has(it.id)){ seen.add(it.id); out.push(it); } } return out.slice(0,12); })();
+  const row=it=>{ const n=isType(it)?S.items.filter(x=>x.type===it.id).length:0;
+    return `<button class="li" data-act="${isType(it)?"picktype":"pick"}" data-id="${esc(it.id)}"><span><b>${esc(disp(it))}</b> <span class="zh">${esc(it.zh)}</span><br><span class="sub">${esc(it.es)} · ${n?`${n} types · `:""}per ${esc(unitWord(it))}</span></span><span class="sub">${n?"›":""}</span></button>`; };
+  $("#pk_res").innerHTML = (res.length ? res.map(row).join("") : `<p class="empty">${q?"No match yet.":"Start typing in English, Spanish or 中文."}</p>`)
+    + (q ? `<p><button class="btn primary block" data-act="quicknew">+ Add “${esc(q)}” as a new item</button></p>` : "");
 }
+/* second step: which kind of milk, cheese… */
+function pickerTypeStep(typeId){
+  const t=itemById(typeId); const subs=S.items.filter(x=>x.type===typeId);
+  const counts=id=>S.purchases.filter(p=>p.item===id).length;
+  $("#pk_res").innerHTML=`<p class="sub" style="margin:4px 0 8px"><b>${esc(t.en)}</b> · ${esc(t.zh)}. Which type?</p>
+   <div class="chips">${subs.sort((a,b)=>counts(b.id)-counts(a.id)).map(x=>`<button class="btn small" data-act="pick" data-id="${esc(x.id)}">${esc(x.sub?x.sub.en:x.en)}${x.sub&&x.sub.zh?` · ${esc(x.sub.zh)}`:""}</button>`).join("")}</div>
+   <p><button class="btn small" data-act="pick" data-id="${esc(t.id)}">Not sure · any ${esc(t.en.toLowerCase())}</button></p>
+   <label class="f" for="pk_newsub">Or a new type of ${esc(t.en.toLowerCase())}</label>
+   <div style="display:flex;gap:8px"><input class="t" id="pk_newsub" placeholder="e.g. Fresh semi-skimmed" autocomplete="off"><button class="btn" data-act="addsub" data-type="${esc(t.id)}">Add</button></div>
+   <p class="sub small">Types are compared with each other only when there are fewer than 3 prices for the one you chose.</p>`;
+  const i=$("#pk_newsub"); if(i) i.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); document.querySelector('[data-act="addsub"]').click(); } });
+}
+function guessBasis(name){ const f=fold(name); if(/\b(\d+\s*)?(ML|CL|L|LT|LITRO|LITROS|LITRE|LITRES)\b/.test(f) || /LECHE|ZUMO|AGUA|ACEITE|BEBIDA|MILK|JUICE|WATER|OIL|WINE|VINO|CERVEZA|BEER/.test(f)) return "L";
+  if(/\b(UDS?|UNIDADES|ROLLOS?|PACK|PIEZAS?|PAIR|ROLLS?|PIECES?|BAGS?|CAPSULAS?|PASTILLAS?)\b/.test(f)) return "unit"; return "kg"; }
+function guessType(name){ const types=S.items.filter(isType); const tk=itemTokens(name); let best=null;
+  for(const t of types){ for(const lab of [t.en,t.es]){ const tt=itemTokens(lab); if(tt.length && tt.every(a=>tk.some(b=>b===a||(a.length>=4&&b.startsWith(a)&&b.length-a.length<=2)))) best=best||t; } }
+  if(!best && /[\u3400-\u9fff]/.test(name)) best=types.find(t=>t.zh && name.includes(t.zh))||null; return best; }
+function guessCat(name){ const m=matchItem(name, S.items, {}); const it=m&&itemById(m.item); return it? it.cat : "pantry"; }
 function closeSheet(){ const s=$("#picker"); if(s) s.remove(); const n=$("#newitem"); if(n) n.remove(); }
 function openNewItem(prefill){
   closeSheet();
+  const t=guessType(prefill||""), basis=t?t.basis:guessBasis(prefill||""), cat=t?t.cat:guessCat(prefill||"");
   const sh=document.createElement("div"); sh.className="sheet"; sh.id="newitem"; sh.setAttribute("role","dialog"); sh.setAttribute("aria-label","New item");
-  sh.innerHTML=`<div class="sheetcard"><div class="hd"><b style="flex:1">New item</b><button class="iconbtn" data-act="closesheet">Close</button></div>${itemFormHTML({en:prefill||"",es:"",zh:"",cat:"pantry",basis:"kg"})}
-   <p><button class="btn primary block" data-act="savenewitem">Add item</button></p></div>`;
-  document.body.appendChild(sh);
+  sh.innerHTML=`<div class="sheetcard"><div class="hd"><b style="flex:1">New item</b><button class="iconbtn" data-act="closesheet">Close</button></div>
+   <label class="f" for="q_name">Name <span class="sub">(any language)</span></label><input class="t" id="q_name" value="${esc(prefill||"")}" autocomplete="off">
+   <label class="f" for="q_type">Is it a type of…</label><select class="t" id="q_type"><option value="">No, it's its own item</option>${S.items.filter(isType).sort((a,b)=>a.en.localeCompare(b.en)).map(x=>`<option value="${x.id}" ${t&&t.id===x.id?"selected":""}>${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}</select>
+   <div id="q_basiswrap" ${t?'style="display:none"':""}><label class="f">Compare prices</label><div class="seg" role="group" aria-label="Compare prices">${[["kg","per kg"],["L","per litre"],["unit","per piece"]].map(([v,l])=>`<button data-act="qbasis" data-v="${v}" aria-pressed="${basis===v}">${l}</button>`).join("")}</div></div>
+   <details class="more"><summary>More details (optional)</summary>
+    <div class="row2"><div><label class="f" for="q_es">Español</label><input class="t" id="q_es"></div><div><label class="f" for="q_zh">中文</label><input class="t" id="q_zh"></div></div>
+    <label class="f" for="q_cat">Category</label><select class="t" id="q_cat">${S.cats.map(c=>`<option value="${c.id}" ${cat===c.id?"selected":""}>${esc(c.en)} · ${esc(c.zh)}</option>`).join("")}</select>
+    <label class="f" for="q_unit">Name of one piece <span class="sub">(for "per piece")</span></label><input class="t" id="q_unit" placeholder="piece, roll, wash…">
+    <label class="f" for="q_alias">Other names on receipts</label><input class="t" id="q_alias" placeholder="comma-separated"></details>
+   <p><button class="btn primary block" data-act="savequick">Add item</button></p></div>`;
+  document.body.appendChild(sh); sh.dataset.basis=basis;
+  $("#q_type").addEventListener("change",e=>{ $("#q_basiswrap").style.display=e.target.value?"none":""; });
+  $("#q_name").focus();
+}
+function quickItemFromSheet(){
+  const name=$("#q_name").value.trim(); if(!name){ toast("Give it a name."); return null; }
+  const tId=$("#q_type").value; const t=tId?itemById(tId):null; const es=$("#q_es").value.trim(), zh=$("#q_zh").value.trim();
+  const slug=fold(name).toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"").slice(0,30)||"item";
+  const it={id:`own_${slug}_${Date.now().toString(36).slice(-4)}`, en:name, es:es||name, zh:zh||(/[\u3400-\u9fff]/.test(name)?name:""), cat:t?t.cat:$("#q_cat").value};
+  if(t){ it.type=t.id; it.basis=t.basis; if(t.unit) it.unit=t.unit; it.sub={en:name, es:es||name, zh:zh||""}; it.en=`${t.en} ${name}`; it.es=`${t.es} ${es||name}`; }
+  else { it.basis=$("#newitem").dataset.basis||"kg"; if(it.basis==="unit"){ const u=$("#q_unit").value.trim()||"piece"; it.unit={en:u,es:u,zh:"個"}; } }
+  const al=$("#q_alias").value.split(",").map(x=>x.trim()).filter(Boolean); if(al.length) it.alias=al;
+  return it;
+}
+/* ---- shop picker ---- */
+let shopCb=null;
+function openStorePicker(cb){
+  shopCb=cb; closeSheet();
+  const sh=document.createElement("div"); sh.className="sheet"; sh.id="picker"; sh.setAttribute("role","dialog"); sh.setAttribute("aria-label","Choose a shop");
+  sh.innerHTML=`<div class="sheetcard"><div class="hd"><input class="t" id="sp_q" type="search" placeholder="Search or type a new shop" autocomplete="off"><button class="iconbtn" data-act="closesheet">Close</button></div><div id="sp_res" class="list"></div></div>`;
+  sh.addEventListener("click",e=>{ if(e.target===sh) closeSheet(); });
+  document.body.appendChild(sh); storeList(); $("#sp_q").focus();
+}
+function storeList(){
+  const q=fold($("#sp_q").value.trim()); const rec=recentStores().filter(id=>storeById(id));
+  const all=S.stores.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const list=q? all.filter(st=>fold(st.name).includes(q)||(st.keywords||[]).some(k=>fold(k).includes(q))) : [...rec.map(storeById), ...all.filter(st=>!rec.includes(st.id))];
+  const exact=q && S.stores.some(st=>fold(st.name)===q);
+  $("#sp_res").innerHTML = (!q&&rec.length?`<p class="sub" style="margin:4px 0">Recent first</p>`:"") + list.slice(0,40).map(st=>`<button class="li" data-act="pickshop" data-id="${esc(st.id)}"><span><b>${esc(st.name)}</b><br><span class="sub">${esc(SHOP_KINDS[st.type]||"Shop")}</span></span><span></span></button>`).join("")
+    + (q&&!exact?`<div class="card" style="margin-top:10px"><b>Add “${esc($("#sp_q").value.trim())}” as a new shop</b><div class="chips" style="margin-top:8px">${NEW_SHOP_KINDS.map(([k,l])=>`<button class="btn small" data-act="newshop" data-kind="${k}">${l}</button>`).join("")}</div></div>`:"");
 }
 function itemFormHTML(it){
   return `<div class="row2"><div><label class="f" for="i_en">English</label><input class="t" id="i_en" value="${esc(it.en)}"></div><div><label class="f" for="i_es">Español</label><input class="t" id="i_es" value="${esc(it.es)}"></div></div>
@@ -732,7 +858,7 @@ function renderReceipt(){
   const n=RC.lines.filter(l=>l.on).length; const sum=round(RC.lines.filter(l=>l.on).reduce((a,l)=>a+(parseNum(l.total)||0),0),2);
   const ok = RC.receiptTotal!=null && Math.abs(sum-RC.receiptTotal)<0.02;
   $("#app").innerHTML=`${topbar("Check the receipt","receipt")}
-  <div class="card"><div class="row2"><div><label class="f" for="r_store" style="margin-top:0">Shop</label><select class="t" id="r_store" data-r="store">${storeOptions(RC.store)}</select></div>
+  <div class="card"><div class="row2"><div><label class="f" style="margin-top:0">Shop</label>${storeBtn(RC.store,"pickrstore")}</div>
     <div><label class="f" for="r_date" style="margin-top:0">Date</label><input class="t" id="r_date" type="date" data-r="date" value="${esc(RC.date||localISO())}" max="${localISO()}"></div></div>
     <div class="row2"><div><label class="f" for="r_cur">Currency</label><select class="t" id="r_cur" data-r="currency">${CURRENCIES.map(c=>`<option ${RC.currency===c?"selected":""}>${c}</option>`).join("")}</select></div>
      ${RC.currency!=="EUR"?`<div><label class="f" for="r_rate">1 € = ? ${esc(RC.currency)}</label><input class="t" id="r_rate" data-r="rate" inputmode="decimal" value="${esc(RC.rate||"")}"></div>`:"<span></span>"}</div>
@@ -744,10 +870,10 @@ function renderReceipt(){
 }
 function receiptLineHTML(l,i){
   const it=itemById(l.item);
-  const c=lineCompute(l); const v= c.ok ? verdict(c.up, purchasesOf(l.item).map(p=>p.unit_price_eur)) : null;
+  const c=lineCompute(l); const v= c.ok ? verdict(c.up, H(l.item).values) : null;
   return `<div class="rline ${l.on?"":"off"}" data-line="${i}">
     <div class="raw">${esc(l.raw)}</div>
-    <button class="pickbtn ${it?"set":""}" data-act="pickline" data-i="${i}">${it?`${esc(it.en)} <span class="zh">${esc(it.zh)}</span>${l.how==="remembered"?`<span class="badge rem">Remembered</span>`:l.how==="guess"?`<span class="badge guess">Best guess</span>`:""}`:"Choose an item…"}</button>
+    <button class="pickbtn ${it?"set":""}" data-act="pickline" data-i="${i}">${it?`${esc(disp(it))} <span class="zh">${esc(it.zh)}</span>${l.how==="remembered"?`<span class="badge rem">Remembered</span>`:l.how==="guess"?`<span class="badge guess">Best guess</span>`:""}`:"Choose an item…"}</button>
     ${it?`<div class="row3" style="margin-top:6px">
       ${l.weight!=null?`<div><label class="f">${it.basis==="L"?"Litres":"Weight kg"}</label><input class="t" data-l="weight" data-i="${i}" inputmode="decimal" value="${esc(String(l.weight).replace(".",","))}"></div><div></div>`
       :`<div><label class="f">Packs</label><input class="t" data-l="qty" data-i="${i}" inputmode="decimal" value="${esc(l.qty)}"></div>
@@ -761,7 +887,7 @@ function receiptLineHTML(l,i){
 function updateReceiptLine(i){
   const l=RC.lines[i]; const box=document.querySelector(`.rline[data-line="${i}"]`); if(!box) return;
   const c=lineCompute(l); const it=itemById(l.item); const s=box.querySelector(".lstat");
-  if(s){ const v=c.ok?verdict(c.up,purchasesOf(l.item).map(p=>p.unit_price_eur)):null; s.innerHTML=c.ok?`<span class="dot k-${v.kind==="none"?"typical":v.kind}"></span>${esc(fmtUnitPrice(c.up,it.basis,unitWord(it)))} · ${esc(v.label)}`:esc(it?c.why:""); }
+  if(s){ const v=c.ok?verdict(c.up,H(l.item).values):null; s.innerHTML=c.ok?`<span class="dot k-${v.kind==="none"?"typical":v.kind}"></span>${esc(fmtUnitPrice(c.up,it.basis,unitWord(it)))} · ${esc(v.label)}`:esc(it?c.why:""); }
   const n=RC.lines.filter(x=>x.on).length, sum=round(RC.lines.filter(x=>x.on).reduce((a,x)=>a+(parseNum(x.total)||0),0),2), ok=RC.receiptTotal!=null && Math.abs(sum-RC.receiptTotal)<0.02;
   const sc=document.querySelector(".sumcheck"); if(sc){ sc.className=`sumcheck ${RC.receiptTotal==null?"":ok?"ok":"warn"}`; sc.innerHTML=`${n} item${n===1?"":"s"} add up to <b>${esc(fmtMoney(sum,RC.currency))}</b>${RC.receiptTotal!=null?` · receipt total ${esc(fmtMoney(RC.receiptTotal,RC.currency))} ${ok?"✓":"— check for missing or extra lines"}`:""}`; }
 }
@@ -801,7 +927,8 @@ async function saveReceipt(){
   const file=$("#r_photo")&&$("#r_photo").files[0];
   if(file){ try{ photo=await uploadPhoto(file,"receipt_"+rid); }catch(e){ toast("Couldn't save the photo; saving the items without it."); } }
   const rows=use.map(l=>{ const c=lineCompute(l); const it=c.it; const byW=l.weight!=null&&l.weight!=="";
-    return {id:newId(), date:RC.date, store:RC.store, item:l.item, product:l.name, pack_count: byW?"":(parseNum(l.count)||1), pack_size: byW||it.basis==="unit"?"":(parseNum(l.size)||""), pack_unit: byW?"":(it.basis==="unit"?"unit":(l.unit||(it.basis==="L"?"ml":"g"))),
+    const bd=detectBrand(l.name);
+    return {id:newId(), date:RC.date, store:RC.store, item:l.item, product:l.name, brand:bd?bd.brand:"", own_label:bd?(bd.own?1:0):"", pack_count: byW?"":(parseNum(l.count)||1), pack_size: byW||it.basis==="unit"?"":(parseNum(l.size)||""), pack_unit: byW?"":(it.basis==="unit"?"unit":(l.unit||(it.basis==="L"?"ml":"g"))),
       packs: byW?"":(parseNum(l.qty)||1), weight: byW?round(c.qty,3):"", price_paid:round(c.total,2), currency:RC.currency, rate:c.rate===1?1:round(c.rate,6), price_eur:round(c.eur,2), qty_basis:round(c.qty,4),
       unit_price_eur:round(c.up,4), promo: l.discount?"discount":"", person:cfg.person, source:"receipt:"+rid, photo, notes:""}; });
   const res=await savePurchases(rows, `${S.people[cfg.person]||cfg.person}: receipt from ${storeName(RC.store)} ${RC.date}`);
@@ -812,28 +939,46 @@ async function saveReceipt(){
 
 /* ===================== ITEM PAGE ===================== */
 const STORE_COLORS=["#1f6b47","#35659b","#b8420e","#8a5a9e","#c99a06","#2a8c8c","#7a8580"];
+function groupTable(rows, U, label){ return `<table class="t2"><tr><th>${label}</th><th style="text-align:right">Best</th><th style="text-align:right">Typical</th></tr>${rows.map(r=>`<tr><td>${r.name}<br><span class="sub small">${r.extra}</span></td><td class="n">${esc(U(r.s.best))}</td><td class="n">${esc(U(r.s.median))}</td></tr>`).join("")}</table>`; }
+function byKey(ps, key){ const m={}; for(const p of ps){ const k=key(p); (m[k]=m[k]||[]).push(p); } return Object.entries(m).map(([k,v])=>({k, v, s:priceStats(v.map(p=>p.unit_price_eur)), last:v.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")).pop()})).sort((a,b)=>a.s.median-b.s.median); }
 function renderItem(id){
   const it=itemById(id); if(!it){ location.hash="items"; return; }
+  if(it.nocompare) return renderBagItem(it);
   setBar(`<button class="btn" data-act="checkitem" data-id="${esc(id)}">Check a price</button><button class="btn primary" data-act="logitem" data-id="${esc(id)}">Log a purchase</button>`);
-  const ps=purchasesOf(id).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+  const fam = isType(it) ? familyIds(it.id, S.items) : [it.id];
+  const all=S.purchases.filter(p=>fam.includes(p.item));
+  const ps=all.filter(comparable).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const s=priceStats(ps.map(p=>p.unit_price_eur)); const best=ps.slice().sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0]; const last=ps[ps.length-1];
-  const byStore={}; for(const p of ps) (byStore[p.store]=byStore[p.store]||[]).push(p);
-  const storeRows=Object.entries(byStore).map(([st,v])=>({st, s:priceStats(v.map(p=>p.unit_price_eur)), last:v[v.length-1]})).sort((a,b)=>a.s.median-b.s.median);
-  const U=x=>fmtUnitPrice(x,it.basis,unitWord(it));
-  $("#app").innerHTML=`${topbar(it.en,"home")}<p class="sub">${esc(it.es)} · ${esc(it.zh)} · compared per ${esc(unitWord(it))}</p>
-  ${best?`<div class="pricetag"><span class="sticker k-great">Best price</span><div class="what">${esc(storeName(best.store))} · ${esc(niceDate(best.date))}${best.product?` · ${esc(best.product)}`:""}</div><div class="big">${esc(U(best.unit_price_eur))}</div>
+  const U=x=>fmtUnitPrice(x,it.basis,unitWord(it)); const parent=it.type?itemById(it.type):null;
+  const subs = isType(it) ? byKey(ps, p=>p.item) : [];
+  const brands = byKey(ps, p=>brandOf(p)||"—");
+  const own=ps.filter(ownOf), named=ps.filter(p=>!ownOf(p)&&brandOf(p));
+  const ownLine = own.length && named.length ? (()=>{ const a=priceStats(own.map(p=>p.unit_price_eur)).median, b=priceStats(named.map(p=>p.unit_price_eur)).median, d=Math.round((1-a/b)*100);
+    return `<p class="sub">${d>0?`Own label is about <b>${d}% cheaper</b> than branded`:d<0?`Own label is about ${-d}% pricier than branded`:"Own label and branded cost about the same"} here (typical ${esc(U(a))} vs ${esc(U(b))}).</p>`; })() : "";
+  $("#app").innerHTML=`${topbar(disp(it),"home")}<p class="sub">${esc(it.es)} · ${esc(it.zh)} · compared per ${esc(unitWord(it))}${parent?` · <button class="linkbtn" data-go="item/${encodeURIComponent(parent.id)}">All ${esc(parent.en.toLowerCase())}</button>`:""}</p>
+  ${best?`<div class="pricetag"><span class="sticker k-great">Best price</span><div class="what">${esc(storeName(best.store))} · ${esc(niceDate(best.date))}${fam.length>1&&best.item!==it.id?` · ${esc(disp(itemById(best.item)))}`:""}${brandOf(best)?` · ${esc(brandOf(best))}`:""}</div><div class="big">${esc(U(best.unit_price_eur))}</div>
     <div class="note">Typical ${esc(U(s.median))} · last ${esc(U(last.unit_price_eur))} at ${esc(storeName(last.store))} · ${s.n} purchase${s.n===1?"":"s"}</div></div>`
    :`<p class="empty">No prices yet. Log a purchase or check a price at the shelf.</p>`}
-  ${s.n>=2?`<div class="card"><h2 class="sec">What counts as a good price</h2><table class="t2">
+  ${subs.length?`<div class="card"><h2 class="sec">By type</h2>${groupTable(subs.map(r=>{ const x=itemById(r.k); return {name:`<button class="linkbtn" data-go="item/${encodeURIComponent(r.k)}">${esc(x.id===it.id?"Not specified":(x.sub?x.sub.en:x.en))}</button>`, extra:`${r.s.n}× · last ${esc(niceDate(r.last.date))}`, s:r.s}; }),U,"Type")}</div>`:""}
+  ${s.n>=2 && !isType(it)?`<div class="card"><h2 class="sec">What counts as a good price</h2><table class="t2">
      <tr><td><span class="dot k-great"></span>Great deal</td><td class="n">≤ ${esc(U(s.best*1.05))}</td></tr>
      ${s.n>=4?`<tr><td><span class="dot k-good"></span>Good</td><td class="n">≤ ${esc(U(s.p25))}</td></tr><tr><td><span class="dot k-typical"></span>Typical</td><td class="n">≤ ${esc(U(s.p75))}</td></tr><tr><td><span class="dot k-expensive"></span>Expensive</td><td class="n">&gt; ${esc(U(s.p75))}</td></tr>`
        :`<tr><td><span class="dot k-good"></span>Good</td><td class="n">≤ ${esc(U(s.median))}</td></tr><tr><td><span class="dot k-expensive"></span>Expensive</td><td class="n">&gt; ${esc(U(s.median*1.15))}</td></tr>`}
    </table><p class="sub small">Based on your ${s.n} purchases. It sharpens as you log more.</p></div>`:""}
-  ${storeRows.length?`<div class="card"><h2 class="sec">By shop</h2><table class="t2"><tr><th>Shop</th><th style="text-align:right">Best</th><th style="text-align:right">Typical</th></tr>
-    ${storeRows.map(r=>`<tr><td>${esc(storeName(r.st))}<br><span class="sub small">last ${esc(niceDate(r.last.date))} · ${r.s.n}×</span></td><td class="n">${esc(U(r.s.best))}</td><td class="n">${esc(U(r.s.median))}</td></tr>`).join("")}</table></div>`:""}
+  ${ps.length?`<div class="card"><h2 class="sec">By shop</h2>${groupTable(byKey(ps,p=>p.store).map(r=>({name:esc(storeName(r.k)), extra:`last ${esc(niceDate(r.last.date))} · ${r.s.n}×`, s:r.s})),U,"Shop")}</div>`:""}
+  ${brands.length>1||(brands[0]&&brands[0].k!=="—")?`<div class="card"><h2 class="sec">By brand</h2>${ownLine}${groupTable(brands.map(r=>({name:`${esc(r.k)}${r.v.some(ownOf)?` <span class="tagpill">own label</span>`:""}`, extra:`${r.s.n}× · ${esc([...new Set(r.v.map(p=>storeName(p.store)))].join(", "))}`, s:r.s})),U,"Brand")}</div>`:""}
   ${ps.length>=2?`<div class="card"><h2 class="sec">Price over time</h2>${priceChart(ps,it)}</div>`:""}
-  ${ps.length?`<div class="card"><h2 class="sec">Purchases</h2><div class="list">${ps.slice().reverse().map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${esc(p.product||"")}${p.product?" · ":""}${esc(qtyText(p,it))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""} · ${esc((S.people[p.person]||""))}</span>${p.photo?` <span class="tagpill">photo</span>`:""}</span><span class="r">${esc(U(p.unit_price_eur))}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`).join("")}</div></div>`:""}
+  ${all.length?`<div class="card"><h2 class="sec">Purchases</h2><div class="list">${all.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${fam.length>1?esc(disp(itemById(p.item)))+" · ":""}${esc(brandOf(p)||p.product||"")}${brandOf(p)||p.product?" · ":""}${esc(qtyText(p,itemById(p.item)||it))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span><span class="r">${p.unit_price_eur>0?esc(U(p.unit_price_eur)):"–"}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`).join("")}</div></div>`:""}
   <p><button class="btn small" data-go="itemedit/${encodeURIComponent(id)}">Edit item</button></p>`;
+}
+function renderBagItem(it){
+  setBar(`<button class="btn primary" data-act="logitem" data-id="${esc(it.id)}">Log a surprise bag</button>`);
+  const ps=S.purchases.filter(p=>p.item===it.id).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  const paid=ps.reduce((a,p)=>a+(p.price_eur||0),0), val=ps.reduce((a,p)=>a+(p.value>0?p.value/(p.rate||1):0),0), withVal=ps.filter(p=>p.value>0).reduce((a,p)=>a+(p.price_eur||0),0);
+  $("#app").innerHTML=`${topbar(it.en,"home")}<p class="sub">${esc(it.es)} · ${esc(it.zh)} · not part of the price comparisons</p>
+  ${ps.length?`<div class="pricetag">${val>withVal?`<span class="sticker k-great">Saved ${esc(fmtMoney(val-withVal))}</span>`:""}<div class="what">${ps.length} bag${ps.length===1?"":"s"}</div><div class="big">${esc(fmtMoney(paid))}</div><div class="note">${val?`Worth ${esc(fmtMoney(val))} in total, by the values you entered.`:"Add the value shown in the app to see your savings."}</div></div>
+   <div class="card"><div class="list">${ps.map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${esc(p.notes||"")}</span></span><span class="r">${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}<small>${p.value>0?"worth "+esc(fmtMoney(p.value,p.currency||"EUR")):""}</small></span></button>`).join("")}</div></div>`
+  :`<p class="empty">No bags logged yet.</p>`}`;
 }
 function qtyText(p,it){
   if(p.weight>0) return `${String(p.weight).replace(".",",")} ${it.basis==="L"?"L":"kg"}`;
@@ -858,7 +1003,8 @@ function priceChart(ps,it){
 /* ===================== ITEMS, SHOPS, PURCHASES ===================== */
 function renderItems(cat){
   setBar(""); const c=cat||"";
-  const list=S.items.filter(it=>!c||it.cat===c).sort((a,b)=>{ const na=purchasesOf(a.id).length, nb=purchasesOf(b.id).length; return nb-na || a.en.localeCompare(b.en); });
+  const n=it=>{ const fam=isType(it)?familyIds(it.id,S.items):[it.id]; return S.purchases.filter(p=>fam.includes(p.item)).length; };
+  const list=S.items.filter(it=>!it.type && (!c||it.cat===c)).sort((a,b)=>n(b)-n(a) || a.en.localeCompare(b.en));
   $("#app").innerHTML=`${topbar("All items","home")}
   <select class="t" id="it_cat" aria-label="Category"><option value="">All categories</option>${S.cats.map(x=>`<option value="${x.id}" ${x.id===c?"selected":""}>${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}</select>
   <div class="card"><div class="list">${list.map(itemLi).join("")||`<p class="empty">No items in this category.</p>`}</div></div>
@@ -872,17 +1018,17 @@ function renderItemEdit(id){
 }
 function renderStores(){
   setBar("");
-  const idx=basketIndex(S.purchases);
+  const idx=basketIndex(S.purchases.filter(comparable));
   $("#app").innerHTML=`${topbar("Compare shops","home")}
   <p class="sub">Compares shops on the items you've bought at more than one of them: each shop's typical unit price against your overall typical price for the same items.</p>
   ${idx.length?`<div class="card"><table class="t2"><tr><th>Shop</th><th style="text-align:right">vs your average</th></tr>${idx.map(r=>{ const pct=Math.round((r.index-1)*100);
      return `<tr><td><b>${esc(storeName(r.store))}</b><br><span class="sub small">${r.items} item${r.items===1?"":"s"} compared${r.items<3?" · few items, rough guide":""}</span></td><td class="n" style="color:var(--${pct<=-3?"great":pct>=3?"expensive":"typical"})">${pct===0?"same":pct<0?`${-pct}% cheaper`:`${pct}% pricier`}</td></tr>`; }).join("")}</table></div>
-    <div class="card"><h2 class="sec">Cheapest shop per item</h2><div class="list">${cheapestPerItem().map(x=>`<button class="li" data-go="item/${encodeURIComponent(x.it.id)}"><span><b>${esc(x.it.en)}</b> <span class="zh">${esc(x.it.zh)}</span><br><span class="sub">${esc(storeName(x.store))}</span></span><span class="r">${esc(fmtUnitPrice(x.med,x.it.basis,unitWord(x.it)))}<small>${x.saving>0?`${Math.round(x.saving*100)}% below the priciest`:""}</small></span></button>`).join("")}</div></div>`
+    <div class="card"><h2 class="sec">Cheapest shop per item</h2><div class="list">${cheapestPerItem().map(x=>`<button class="li" data-go="item/${encodeURIComponent(x.it.id)}"><span><b>${esc(disp(x.it))}</b> <span class="zh">${esc(x.it.zh)}</span><br><span class="sub">${esc(storeName(x.store))}</span></span><span class="r">${esc(fmtUnitPrice(x.med,x.it.basis,unitWord(x.it)))}<small>${x.saving>0?`${Math.round(x.saving*100)}% below the priciest`:""}</small></span></button>`).join("")}</div></div>`
    :`<p class="empty">Buy the same items at two or more shops and the comparison appears here.</p>`}`;
 }
 function cheapestPerItem(){
   const out=[]; const by={};
-  for(const p of S.purchases){ if(!(p.unit_price_eur>0)) continue; ((by[p.item]=by[p.item]||{})[p.store]=(by[p.item][p.store]||[])).push(p.unit_price_eur); }
+  for(const p of S.purchases){ if(!comparable(p)) continue; ((by[p.item]=by[p.item]||{})[p.store]=(by[p.item][p.store]||[])).push(p.unit_price_eur); }
   for(const [item,st] of Object.entries(by)){ const it=itemById(item); if(!it || Object.keys(st).length<2) continue;
     const meds=Object.entries(st).map(([s,v])=>[s,priceStats(v).median]).sort((a,b)=>a[1]-b[1]); out.push({it, store:meds[0][0], med:meds[0][1], saving:1-meds[0][1]/meds[meds.length-1][1]}); }
   return out.sort((a,b)=>b.saving-a.saving);
@@ -926,8 +1072,21 @@ document.addEventListener("click", async ev=>{
   if(a==="closesheet") return closeSheet();
   if(a==="pickitem") return openPicker(id=>{ const keep=F.item===id; F.item=id; if(!keep){ const it=itemById(id); F.pack_unit=defaultUnit(it); F.pack_size=""; F.pack_count=1; F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat) ? "weight" : "pack"; } renderForm(F._kind, F.item); });
   if(a==="pick"){ const cb=pickCb; closeSheet(); if(cb) cb(t.dataset.id); return; }
+  if(a==="picktype"){ pickerTypeStep(t.dataset.id); return; }
+  if(a==="addsub"){ const name=($("#pk_newsub").value||"").trim(); if(!name){ toast("Type the new type's name."); return; }
+    const ty=itemById(t.dataset.type); const dup=S.items.find(x=>x.type===ty.id && fold(x.sub?x.sub.en:x.en)===fold(name)); const cb=pickCb;
+    if(dup){ closeSheet(); if(cb) cb(dup.id); return; }
+    const it={id:`own_${ty.id.slice(2)}_${fold(name).toLowerCase().replace(/[^a-z0-9]+/g,"_").slice(0,20)}_${Date.now().toString(36).slice(-3)}`, type:ty.id, sub:{en:name,es:name,zh:""}, en:`${ty.en} ${name}`, es:`${ty.es} ${name}`, zh:"", cat:ty.cat, basis:ty.basis, ...(ty.unit?{unit:ty.unit}:{})};
+    try{ await upsertItem(it); toast(`Added ${disp(it)}`); closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
+  if(a==="quicknew"){ return openNewItem($("#pk_q").value.trim()); }
+  if(a==="qbasis"){ const sh=$("#newitem"); sh.dataset.basis=t.dataset.v; sh.querySelectorAll('[data-act="qbasis"]').forEach(b=>b.setAttribute("aria-pressed", b.dataset.v===t.dataset.v)); return; }
+  if(a==="savequick"){ const it=quickItemFromSheet(); if(!it) return; const cb=pickCb; try{ await upsertItem(it); toast(`Added ${disp(it)}`); closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
+  if(a==="pickstore"){ return openStorePicker(id=>{ F.store=id; renderForm(F._kind, F.item); }); }
+  if(a==="pickrstore"){ return openStorePicker(id=>{ RC.store=id; const mem=(S.mappings.byStore||{})[id]||{}; for(const l of RC.lines){ if(!l.item||l.how==="guess"){ const m=matchItem(l.name,S.items,mem); if(m&&m.how==="remembered"){ l.item=m.item; l.how="remembered"; } } } renderReceipt(); }); }
+  if(a==="pickshop"){ const cb=shopCb; closeSheet(); if(cb) cb(t.dataset.id); return; }
+  if(a==="newshop"){ const name=$("#sp_q").value.trim(); if(!name) return; const cb=shopCb; t.disabled=true; try{ const st=await addStore(name, t.dataset.kind); toast(`Added ${st.name}`); closeSheet(); if(cb) cb(st.id); }catch(e){ toast(e.message); t.disabled=false; } return; }
   if(a==="newitem"){ const q=$("#pk_q")?$("#pk_q").value:""; return openNewItem(q); }
-  if(a==="newitemstandalone"){ pickCb=id=>{ location.hash="item/"+encodeURIComponent(id); }; return openNewItem(""); }
+  if(a==="newitemstandalone"){ pickCb=id=>{ location.hash="item/"+encodeURIComponent(id); }; return openNewItem(($("#h_q")&&$("#h_q").value)||""); }
   if(a==="savenewitem"){ const it=itemFromForm(null); if(!it) return; try{ await upsertItem(it); toast("Item added"); const cb=pickCb; closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
   if(a==="saveitem"){ const base=itemById(t.dataset.id); const it=itemFromForm(base); if(!it) return; try{ await upsertItem(it); toast("Item saved"); location.hash="item/"+encodeURIComponent(it.id); }catch(e){ toast(e.message); } return; }
   if(a==="mode"){ F.mode=t.dataset.v; renderForm(F._kind, F.item); return; }
@@ -950,12 +1109,16 @@ document.addEventListener("input", ev=>{
   const el=ev.target;
   if(el.id==="h_q"){ const r=searchItems(el.value); $("#h_res").innerHTML=r.map(itemLi).join("")||(el.value?`<p class="empty">No match. <button class="btn small" data-act="newitemstandalone">+ New item</button></p>`:""); return; }
   if(el.id==="pk_q") return pickerList();
+  if(el.id==="sp_q") return storeList();
+  if(el.id==="f_brand" && F){ F.brand=el.value; const own=$("#f_own"); if(own && F.own==="") own.checked=isOwnLabel(el.value); return; }
   if(el.dataset.f && F){ F[el.dataset.f]=el.value; if(el.tagName!=="SELECT") updateResult(); return; }
   if(el.dataset.l!==undefined && RC){ if(el.type==="checkbox") return; RC.lines[+el.dataset.i][el.dataset.l]=el.value; updateReceiptLine(+el.dataset.i); return; }
   if(el.dataset.r && RC){ RC[el.dataset.r]=el.value; }
 });
 document.addEventListener("change", async ev=>{
   const el=ev.target;
+  if(el.id==="f_own" && F){ F.own=el.checked?"1":"0"; return; }
+  if(el.id==="f_product" && F){ F.product=el.value; if(!F.brand){ const d=detectBrand(el.value); if(d){ F.brand=d.brand; const b=$("#f_brand"); if(b) b.value=d.brand; const own=$("#f_own"); if(own&&F.own==="") own.checked=d.own; } } return; }
   if(el.id==="it_cat"){ location.hash="items/"+el.value; return; }
   if(el.dataset.f && F){
     if(el.dataset.f==="store" && el.value==="__new"){ const n=prompt("Name of the shop"); if(n&&n.trim()){ try{ const st=await addStore(n.trim()); F.store=st.id; }catch(e){ toast(e.message); F.store=""; } } else F.store=""; renderForm(F._kind,F.item); return; }
