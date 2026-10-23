@@ -115,6 +115,8 @@ table.t2 td.n{text-align:right;font-family:var(--price);font-stretch:85%;font-we
 .photo{max-width:100%;border-radius:10px;display:block;margin-top:8px}
 .warnline{margin-top:8px;padding:6px 8px;border-radius:8px;background:rgba(184,66,14,.16);font-weight:700;font-size:14px}
 .warntext{color:var(--expensive)}
+.filters .chips{margin:10px 0 8px} .filters .row2{margin-top:6px}
+[data-act="pfperiod"][aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);box-shadow:none}
 .linkbtn{border:0;background:none;color:var(--accent);font-weight:600;padding:0;font-size:inherit;text-decoration:underline;text-underline-offset:2px;min-height:28px;text-align:left}
 .checkrow{display:flex;gap:8px;align-items:center;min-height:46px;font-size:15px}
 .checkrow input{width:22px;height:22px}
@@ -526,8 +528,8 @@ async function uploadPhoto(file, id){
 
 /* ===================== CURRENCIES ===================== */
 const CURRENCIES=["EUR","USD","GBP","TWD","JPY"];
-const SHOP_KINDS={supermarket:"Supermarket",discount:"Supermarket",hypermarket:"Supermarket",wholesale:"Wholesale",online:"Online",rescue:"Food-rescue app",market:"Market",greengrocer:"Speciality shop",butcher:"Speciality shop",fishmonger:"Speciality shop",diy:"DIY & home",home:"DIY & home",own:"Shop"};
-const NEW_SHOP_KINDS=[["supermarket","Supermarket"],["online","Online"],["market","Market"],["greengrocer","Speciality shop"],["rescue","Food-rescue app"],["diy","DIY & home"]];
+const SHOP_KINDS={asian:"Asian supermarket",supermarket:"Supermarket",discount:"Supermarket",hypermarket:"Supermarket",wholesale:"Wholesale",online:"Online",rescue:"Food-rescue app",market:"Market",greengrocer:"Speciality shop",butcher:"Speciality shop",fishmonger:"Speciality shop",diy:"DIY & home",home:"DIY & home",own:"Shop"};
+const NEW_SHOP_KINDS=[["supermarket","Supermarket"],["asian","Asian supermarket"],["online","Online"],["market","Market"],["greengrocer","Speciality shop"],["rescue","Food-rescue app"],["diy","DIY & home"]];
 /* 1 EUR = rate × currency, on the purchase date (daily reference rates; earliest 2024-03-02) */
 async function rateFor(cur, date){
   if(cur==="EUR") return 1;
@@ -679,7 +681,7 @@ function itemLi(it){
   const ps=S.purchases.filter(p=>fam.includes(p.item) && comparable(p)); const s=priceStats(ps.map(p=>p.unit_price_eur));
   const best=ps.sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0]; const nSub=isType(it)?S.items.filter(x=>x.type===it.id).length:0;
   return `<button class="li" data-go="item/${encodeURIComponent(it.id)}"><span><b>${esc(disp(it))}</b> <span class="zh">${esc(it.zh)}</span><br><span class="sub">${esc(it.es)}${nSub?` · ${nSub} types`:""}</span></span>
-   <span class="r">${s.n?esc(fmtUnitPrice(s.best,it.basis,unitWord(it))):it.nocompare?"":"–"}<small>${best?esc("best · "+storeName(best.store)):it.nocompare?"not compared":"no prices yet"}</small></span></button>`;
+   <span class="r">${s.n?(nSub?"<small style=\"display:inline\">from </small>":"")+esc(fmtUnitPrice(s.best,it.basis,unitWord(it))):it.nocompare?"":"–"}<small>${best?esc((nSub?(best.item!==it.id&&itemById(best.item)&&itemById(best.item).sub?itemById(best.item).sub.en.toLowerCase()+" · ":""):"best · ")+storeName(best.store)):it.nocompare?"not compared":"no prices yet"}</small></span></button>`;
 }
 /* ===================== CHECK / LOG / EDIT FORM ===================== */
 let F=null;   // the form being filled
@@ -1064,13 +1066,26 @@ function priceChart(ps,it){
 }
 
 /* ===================== ITEMS, SHOPS, PURCHASES ===================== */
+let IF={q:"", bought:false};
+function itemsListHTML(cat){
+  const c=cat||""; const q=fold(IF.q.trim());
+  const n=it=>{ const fam=isType(it)?familyIds(it.id,S.items):[it.id]; return S.purchases.filter(p=>fam.includes(p.item)).length; };
+  let list;
+  if(q){ /* search everything, subtypes included */
+    const hit=it=>{ const ty=it.type?itemById(it.type):null; return [it.en,it.es,it.zh,...(it.alias||[]),ty&&ty.en,ty&&ty.es,ty&&ty.zh,it.sub&&it.sub.en,it.sub&&it.sub.es,it.sub&&it.sub.zh].filter(Boolean).map(fold).some(h=>h.includes(q)); };
+    list=S.items.filter(it=>hit(it) && (!c||it.cat===c));
+  } else list=S.items.filter(it=>!it.type && (!c||it.cat===c));
+  if(IF.bought) list=list.filter(it=>n(it)>0);
+  list.sort((a,b)=>n(b)-n(a) || disp(a).localeCompare(disp(b)));
+  return `<p class="sub">${list.length} item${list.length===1?"":"s"}</p><div class="card"><div class="list">${list.map(itemLi).join("")||`<p class="empty">No items match.${q?` <button class="btn small" data-act="newitemstandalone">+ Add “${esc(IF.q.trim())}”</button>`:""}</p>`}</div></div>`;
+}
 function renderItems(cat){
   setBar(""); const c=cat||"";
-  const n=it=>{ const fam=isType(it)?familyIds(it.id,S.items):[it.id]; return S.purchases.filter(p=>fam.includes(p.item)).length; };
-  const list=S.items.filter(it=>!it.type && (!c||it.cat===c)).sort((a,b)=>n(b)-n(a) || a.en.localeCompare(b.en));
   $("#app").innerHTML=`${topbar("All items","home")}
-  <select class="t" id="it_cat" aria-label="Category"><option value="">All categories</option>${S.cats.map(x=>`<option value="${x.id}" ${x.id===c?"selected":""}>${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}</select>
-  <div class="card"><div class="list">${list.map(itemLi).join("")||`<p class="empty">No items in this category.</p>`}</div></div>
+  <div class="card filters"><input class="t" id="if_q" type="search" placeholder="Search: leche, milk, 牛奶, griego…" value="${esc(IF.q)}" autocomplete="off">
+   <div class="row2"><select class="t" id="it_cat" aria-label="Category"><option value="">All categories</option>${S.cats.map(x=>`<option value="${x.id}" ${x.id===c?"selected":""}>${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}</select>
+    <label class="checkrow"><input type="checkbox" id="if_bought" ${IF.bought?"checked":""}> Only items I've bought</label></div></div>
+  <div id="if_list">${itemsListHTML(c)}</div>
   <p><button class="btn small" data-act="newitemstandalone">+ New item</button></p>`;
 }
 function renderItemEdit(id){
@@ -1096,13 +1111,41 @@ function cheapestPerItem(){
     const meds=Object.entries(st).map(([s,v])=>[s,priceStats(v).median]).sort((a,b)=>a[1]-b[1]); out.push({it, store:meds[0][0], med:meds[0][1], saving:1-meds[0][1]/meds[meds.length-1][1]}); }
   return out.sort((a,b)=>b.saving-a.saving);
 }
+let PF={q:"", period:"all", from:"", to:"", cat:"", shop:""};
+function periodRange(p){ const t=new Date(), y=t.getFullYear(), m=t.getMonth(); const iso=d=>localISO(d);
+  if(p==="month") return [iso(new Date(y,m,1)), iso(t)]; if(p==="3m") return [iso(new Date(y,m-2,1)), iso(t)];
+  if(p==="year") return [`${y}-01-01`, iso(t)]; if(p==="lastyear") return [`${y-1}-01-01`, `${y-1}-12-31`];
+  if(p==="custom") return [PF.from||"0000", PF.to||"9999"]; return ["0000","9999"]; }
+function purchaseMatches(p){
+  const [a,b]=periodRange(PF.period); if((p.date||"")<a || (p.date||"")>b) return false;
+  const it=itemById(p.item); const ty=it&&it.type?itemById(it.type):null;
+  if(PF.cat && (it?it.cat:"")!==PF.cat) return false;
+  if(PF.shop && p.store!==PF.shop) return false;
+  if(PF.q){ const q=fold(PF.q); const hay=[it&&disp(it), it&&it.es, it&&it.zh, ty&&ty.es, ty&&ty.zh, p.product, brandOf(p), storeName(p.store), p.notes].filter(Boolean).map(fold).join(" | "); if(!hay.includes(q)) return false; }
+  return true;
+}
+function purchasesListHTML(){
+  const ps=S.purchases.filter(purchaseMatches).sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.id||"").localeCompare(a.id||""));
+  const clear = PF.q||PF.period!=="all"||PF.cat||PF.shop ? ` · <button class="linkbtn" data-act="pfclear">Clear filters</button>` : "";
+  if(!ps.length) return `<p class="empty">No purchases match.${clear}</p>`;
+  const total=ps.reduce((a,p)=>a+(p.price_eur||0),0);
+  const byMonth={}; for(const p of ps){ const m=(p.date||"").slice(0,7); (byMonth[m]=byMonth[m]||[]).push(p); }
+  return `<p class="sub"><b>${ps.length}</b> purchase${ps.length===1?"":"s"} · <b>${esc(fmtMoney(total,"EUR"))}</b>${clear}</p>`+Object.entries(byMonth).map(([m,v])=>`<div class="card"><h2 class="sec">${esc(new Date(m+"-15T12:00:00").toLocaleDateString("en-GB",{month:"long",year:"numeric"}))} · ${esc(fmtMoney(v.reduce((a,p)=>a+(p.price_eur||0),0),"EUR"))}</h2><div class="list">${v.map(p=>purchaseLi(p).replace(`data-go="item/${encodeURIComponent(p.item)}"`,`data-go="edit/${encodeURIComponent(p.id)}"`)).join("")}</div></div>`).join("");
+}
 function renderPurchases(){
   setBar("");
-  const ps=S.purchases.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.id||"").localeCompare(a.id||""));
-  const byMonth={}; for(const p of ps){ const m=(p.date||"").slice(0,7); (byMonth[m]=byMonth[m]||[]).push(p); }
-  $("#app").innerHTML=`${topbar("All purchases","home")}${Object.entries(byMonth).map(([m,v])=>`<div class="card"><h2 class="sec">${esc(new Date(m+"-15T12:00:00").toLocaleDateString("en-GB",{month:"long",year:"numeric"}))} · ${esc(fmtMoney(v.reduce((a,p)=>a+(p.price_eur||0),0),"EUR"))}</h2><div class="list">${v.map(p=>purchaseLi(p).replace(`data-go="item/${encodeURIComponent(p.item)}"`,`data-go="edit/${encodeURIComponent(p.id)}"`)).join("")}</div></div>`).join("")||`<p class="empty">Nothing logged yet.</p>`}`;
+  const shops=[...new Set(S.purchases.map(p=>p.store))].filter(storeById).sort((a,b)=>storeName(a).localeCompare(storeName(b)));
+  const cats=[...new Set(S.purchases.map(p=>(itemById(p.item)||{}).cat).filter(Boolean))];
+  $("#app").innerHTML=`${topbar("All purchases","home")}
+  <div class="card filters">
+   <input class="t" id="pf_q" type="search" placeholder="Search: item, brand, shop… (any language)" value="${esc(PF.q)}" autocomplete="off">
+   <div class="chips" role="group" aria-label="Period">${[["all","All"],["month","This month"],["3m","3 months"],["year","This year"],["lastyear","Last year"],["custom","Dates…"]].map(([k,l])=>`<button class="btn small" data-act="pfperiod" data-p="${k}" aria-pressed="${PF.period===k}">${l}</button>`).join("")}</div>
+   ${PF.period==="custom"?`<div class="row2"><div><label class="f" for="pf_from">From</label><input class="t" id="pf_from" type="date" value="${esc(PF.from)}"></div><div><label class="f" for="pf_to">To</label><input class="t" id="pf_to" type="date" value="${esc(PF.to)}"></div></div>`:""}
+   <div class="row2"><select class="t" id="pf_cat" aria-label="Category"><option value="">All categories</option>${S.cats.filter(c=>cats.includes(c.id)).map(c=>`<option value="${c.id}" ${PF.cat===c.id?"selected":""}>${esc(c.en)} · ${esc(c.zh)}</option>`).join("")}</select>
+    <select class="t" id="pf_shop" aria-label="Shop"><option value="">All shops</option>${shops.map(id=>`<option value="${esc(id)}" ${PF.shop===id?"selected":""}>${esc(storeName(id))}</option>`).join("")}</select></div>
+  </div>
+  <div id="pf_list">${purchasesListHTML()}</div>`;
 }
-
 /* ===================== SHOPS ===================== */
 function renderShops(){
   setBar("");
@@ -1182,6 +1225,8 @@ document.addEventListener("click", async ev=>{
   if(a==="closesheet") return closeSheet();
   if(a==="pickitem") return openPicker(id=>{ const keep=F.item===id; F.item=id; if(!keep){ const it=itemById(id); F.pack_unit=defaultUnit(it); F.pack_size=""; F.pack_count=1; F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat) ? "weight" : "pack"; } renderForm(F._kind, F.item); });
   if(a==="pick"){ const cb=pickCb; closeSheet(); if(cb) cb(t.dataset.id); return; }
+  if(a==="pfperiod"){ PF.period=t.dataset.p; renderPurchases(); return; }
+  if(a==="pfclear"){ PF={q:"", period:"all", from:"", to:"", cat:"", shop:""}; renderPurchases(); return; }
   if(a==="itemcountry"){ itemCountry=t.dataset.c; itemCountryFor=t.dataset.id; renderItem(t.dataset.id); return; }
   if(a==="picktype"){ pickerTypeStep(t.dataset.id); return; }
   if(a==="addsub"){ const name=($("#pk_newsub").value||"").trim(); if(!name){ toast("Type the new type's name."); return; }
@@ -1197,7 +1242,7 @@ document.addEventListener("click", async ev=>{
   if(a==="pickshop"){ const cb=shopCb; closeSheet(); if(cb) cb(t.dataset.id); return; }
   if(a==="newshop"){ const name=$("#sp_q").value.trim(); if(!name) return; const cb=shopCb; t.disabled=true; try{ const st=await addStore(name, t.dataset.kind, $("#sp_country").value); toast(`Added ${st.name}`); closeSheet(); if(cb) cb(st.id); }catch(e){ toast(e.message); t.disabled=false; } return; }
   if(a==="newitem"){ const q=$("#pk_q")?$("#pk_q").value:""; return openNewItem(q); }
-  if(a==="newitemstandalone"){ pickCb=id=>{ location.hash="item/"+encodeURIComponent(id); }; return openNewItem(($("#h_q")&&$("#h_q").value)||""); }
+  if(a==="newitemstandalone"){ pickCb=id=>{ location.hash="item/"+encodeURIComponent(id); }; return openNewItem(($("#h_q")&&$("#h_q").value)||($("#if_q")&&$("#if_q").value)||""); }
   if(a==="savenewitem"){ const it=itemFromForm(null); if(!it) return; try{ await upsertItem(it); toast("Item added"); const cb=pickCb; closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
   if(a==="saveitem"){ const base=itemById(t.dataset.id); const it=itemFromForm(base); if(!it) return; try{ await upsertItem(it); toast("Item saved"); location.hash="item/"+encodeURIComponent(it.id); }catch(e){ toast(e.message); } return; }
   if(a==="mode"){ F.mode=t.dataset.v; renderForm(F._kind, F.item); return; }
@@ -1224,6 +1269,8 @@ document.addEventListener("input", ev=>{
   if(el.id==="h_q"){ const r=searchItems(el.value); $("#h_res").innerHTML=r.map(itemLi).join("")||(el.value?`<p class="empty">No match. <button class="btn small" data-act="newitemstandalone">+ New item</button></p>`:""); return; }
   if(el.id==="pk_q") return pickerList();
   if(el.id==="sp_q") return storeList();
+  if(el.id==="pf_q"){ PF.q=el.value; $("#pf_list").innerHTML=purchasesListHTML(); return; }
+  if(el.id==="if_q"){ IF.q=el.value; $("#if_list").innerHTML=itemsListHTML((location.hash.split("/")[1]||"")); return; }
   if(el.id==="f_brand" && F){ F.brand=el.value; const own=$("#f_own"); if(own && F.own==="") own.checked=isOwnLabel(el.value); return; }
   if(el.dataset.f && F){ F[el.dataset.f]=el.value; if(el.tagName!=="SELECT") updateResult(); return; }
   if(el.dataset.l!==undefined && RC){ if(el.type==="checkbox") return; RC.lines[+el.dataset.i][el.dataset.l]=el.value; updateReceiptLine(+el.dataset.i); return; }
@@ -1234,6 +1281,10 @@ document.addEventListener("change", async ev=>{
   if(el.id==="f_own" && F){ F.own=el.checked?"1":"0"; return; }
   if(el.id==="f_product" && F){ F.product=el.value; if(!F.brand){ const d=detectBrand(el.value); if(d){ F.brand=d.brand; const b=$("#f_brand"); if(b) b.value=d.brand; const own=$("#f_own"); if(own&&F.own==="") own.checked=d.own; } } return; }
   if(el.id==="it_cat"){ location.hash="items/"+el.value; return; }
+  if(el.id==="if_bought"){ IF.bought=el.checked; $("#if_list").innerHTML=itemsListHTML((location.hash.split("/")[1]||"")); return; }
+  if(el.id==="pf_cat"){ PF.cat=el.value; $("#pf_list").innerHTML=purchasesListHTML(); return; }
+  if(el.id==="pf_shop"){ PF.shop=el.value; $("#pf_list").innerHTML=purchasesListHTML(); return; }
+  if(el.id==="pf_from"||el.id==="pf_to"){ PF[el.id==="pf_from"?"from":"to"]=el.value; $("#pf_list").innerHTML=purchasesListHTML(); return; }
   if(el.dataset.f && F){
     if(el.dataset.f==="store" && el.value==="__new"){ const n=prompt("Name of the shop"); if(n&&n.trim()){ try{ const st=await addStore(n.trim()); F.store=st.id; }catch(e){ toast(e.message); F.store=""; } } else F.store=""; renderForm(F._kind,F.item); return; }
     F[el.dataset.f]=el.value;
