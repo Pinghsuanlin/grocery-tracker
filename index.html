@@ -635,6 +635,8 @@ function render(){
   if(view==="items") return renderItems(arg);
   if(view==="itemedit") return renderItemEdit(arg);
   if(view==="stores") return renderStores();
+  if(view==="shops") return renderShops();
+  if(view==="shopedit") return renderShopEdit(arg);
   if(view==="purchases") return renderPurchases();
   if(view==="settings") return renderSettings(false);
   return renderHome();
@@ -664,7 +666,7 @@ function renderHome(){
   <div class="links"><button class="btn primary" data-go="log">Log a purchase</button><button class="btn" data-go="receipt">Add from a receipt</button></div>
   <div class="card"><label class="f" for="h_q" style="margin-top:0">Find an item</label><input class="t" id="h_q" type="search" placeholder="Leche, milk, 牛奶…" autocomplete="off"><div id="h_res" class="list"></div></div>
   <div class="card"><h2 class="sec">Recent purchases</h2>${recent.length?`<div class="list">${recent.map(purchaseLi).join("")}</div><p><button class="btn small" data-go="purchases">All purchases</button></p>`:`<p class="empty">Nothing logged yet. Log a purchase or add a receipt to start.</p>`}</div>
-  <div class="links"><button class="btn" data-go="stores">Compare shops</button><button class="btn" data-go="items">All items</button></div>`;
+  <div class="links"><button class="btn" data-go="stores">Compare shops</button><button class="btn" data-go="items">All items</button><button class="btn" data-go="shops">Shops</button></div>`;
 }
 function purchaseLi(p){
   const it=itemById(p.item); const b=brandOf(p);
@@ -1101,6 +1103,50 @@ function renderPurchases(){
   $("#app").innerHTML=`${topbar("All purchases","home")}${Object.entries(byMonth).map(([m,v])=>`<div class="card"><h2 class="sec">${esc(new Date(m+"-15T12:00:00").toLocaleDateString("en-GB",{month:"long",year:"numeric"}))} · ${esc(fmtMoney(v.reduce((a,p)=>a+(p.price_eur||0),0),"EUR"))}</h2><div class="list">${v.map(p=>purchaseLi(p).replace(`data-go="item/${encodeURIComponent(p.item)}"`,`data-go="edit/${encodeURIComponent(p.id)}"`)).join("")}</div></div>`).join("")||`<p class="empty">Nothing logged yet.</p>`}`;
 }
 
+/* ===================== SHOPS ===================== */
+function renderShops(){
+  setBar("");
+  const by={}; for(const st of S.stores){ (by[storeCountry(st.id)]=by[storeCountry(st.id)]||[]).push(st); }
+  const n=id=>S.purchases.filter(p=>p.store===id).length;
+  const order=Object.keys(by).sort((a,b)=>(a===HOME?-1:b===HOME?1:countryName(a).localeCompare(countryName(b))));
+  $("#app").innerHTML=`${topbar("Shops","home")}<p class="sub">Tap a shop to change its name, kind or country. Prices are only compared between shops in the same country.</p>
+  ${order.map(c=>`<div class="card"><h2 class="sec">${esc(countryName(c))}</h2><div class="list">${by[c].sort((a,b)=>n(b.id)-n(a.id)||a.name.localeCompare(b.name)).map(st=>`<button class="li" data-go="shopedit/${encodeURIComponent(st.id)}"><span><b>${esc(st.name)}</b><br><span class="sub">${esc(SHOP_KINDS[st.type]||"Shop")}</span></span><span class="r">${n(st.id)||""}<small>${n(st.id)?"purchases":""}</small></span></button>`).join("")}</div></div>`).join("")}
+  <p><button class="btn small" data-act="newshopfromlist">+ Add a shop</button></p>`;
+}
+function renderShopEdit(id){
+  const st=storeById(id); if(!st){ location.hash="shops"; return; }
+  setBar(`<button class="btn primary" data-act="saveshop" data-id="${esc(id)}">Save shop</button>`);
+  const kinds=[...new Set([...NEW_SHOP_KINDS.map(x=>x[0]), st.type])];
+  $("#app").innerHTML=`${topbar("Edit shop","shops")}<div class="card">
+   <label class="f" for="se_name" style="margin-top:0">Name</label><input class="t" id="se_name" value="${esc(st.name)}">
+   <div class="row2"><div><label class="f" for="se_kind">Kind</label><select class="t" id="se_kind">${kinds.map(k=>`<option value="${esc(k)}" ${k===st.type?"selected":""}>${esc(SHOP_KINDS[k]||k)}</option>`).join("")}</select></div>
+    <div><label class="f" for="se_country">Country</label><select class="t" id="se_country">${COUNTRIES.map(([c,l])=>`<option value="${c}" ${c===storeCountry(st.id)?"selected":""}>${l}</option>`).join("")}</select></div></div>
+   <label class="f" for="se_kw">Words that identify it on receipts <span class="sub">(comma-separated)</span></label><input class="t" id="se_kw" value="${esc((st.keywords||[]).join(", "))}">
+   <p class="sub">${S.purchases.filter(p=>p.store===id).length} purchases. Changing the country moves them into that country's comparisons.</p></div>`;
+}
+async function saveShop(id){
+  const name=$("#se_name").value.trim(); if(!name){ toast("Give the shop a name."); return; }
+  const patch={name, type:$("#se_kind").value, country:$("#se_country").value, keywords:$("#se_kw").value.split(",").map(x=>x.trim()).filter(Boolean)};
+  try{
+    await ghUpdate("stores.json", t=>{ const d=JSON.parse(t); const st=d.stores.find(x=>x.id===id); if(!st) throw new Error("Shop not found."); Object.assign(st,patch); if(st.country===HOME) delete st.country; return JSON.stringify(d,null,1)+"\n"; }, `Edit shop ${name}`);
+    const st=storeById(id); Object.assign(st,patch); if(st.country===HOME) delete st.country; saveCache(); toast("Shop saved"); location.hash="shops";
+  }catch(e){ toast(e.message); }
+}
+/* ===================== IMPORT A FILE ===================== */
+async function importFile(){
+  const file=$("#imp_file")&&$("#imp_file").files[0]; if(!file){ toast("Choose a CSV file first."); return; }
+  const rows=csvParse(await file.text()); const need=["id","date","store","item","price_paid"];
+  if(!rows.length || need.some(k=>!(k in rows[0]))){ toast("This file isn't in the app's format (it needs id, date, store, item and price_paid columns)."); return; }
+  const have=new Set(S.purchases.map(p=>p.id)); const fresh=rows.filter(r=>r.id && !have.has(r.id));
+  const noItem=[...new Set(fresh.filter(r=>!itemById(r.item)).map(r=>r.item))], noShop=[...new Set(fresh.filter(r=>!storeById(r.store)).map(r=>r.store))];
+  if(noItem.length||noShop.length){ toast(`Upload the latest items.json and stores.json first: ${[...noItem,...noShop].slice(0,4).join(", ")}${noItem.length+noShop.length>4?"…":""} not found.`); return; }
+  if(!fresh.length){ toast(`All ${rows.length} rows are already in your data.`); return; }
+  if(!confirm(`Add ${fresh.length} purchase${fresh.length===1?"":"s"}${rows.length>fresh.length?` (${rows.length-fresh.length} already there are skipped)`:""}?`)) return;
+  const cols=LOG_HEADER.split(","); const lines=fresh.map(r=>csvLine(cols.map(c=>r[c]??"")));
+  try{ const text=await ghUpdate("purchases.csv", t=>appendLines(t,lines), `Import ${fresh.length} purchases from ${file.name}`); S.purchases=csvParse(text).map(numRow); saveCache(); toast(`${fresh.length} purchases imported`); location.hash="home"; }
+  catch(e){ toast(e.message); }
+}
+
 /* ===================== SETTINGS ===================== */
 function renderSettings(first){
   setBar("");
@@ -1114,6 +1160,9 @@ function renderSettings(first){
     <p><button class="btn primary block" data-act="savecfg">Connect and sync</button></p><p id="s_msg" class="err" role="alert"></p></div>
   ${!first?`<div class="card"><h2 class="sec">Names</h2><div class="row2"><div><label class="f" for="n1">Person 1</label><input class="t" id="n1" value="${esc(S.people.user1||"")}" maxlength="24"></div><div><label class="f" for="n2">Person 2</label><input class="t" id="n2" value="${esc(S.people.user2||"")}" maxlength="24"></div></div>
      <p><button class="btn block" data-act="savenames">Save names</button></p></div>
+   <div class="card"><h2 class="sec">Import purchases from a file</h2><p class="sub">A CSV in the app's format, for example one prepared from an old log. Rows already in your data are skipped, so importing twice is safe.</p>
+     <input id="imp_file" type="file" accept=".csv,text/csv"><p><button class="btn block" data-act="importfile">Import</button></p></div>
+   <div class="card"><p class="sub"><button class="linkbtn" data-go="shops">Shops: names, kinds and countries</button></p></div>
    <div class="card"><p class="sub">${S.synced?`Last synced ${esc(new Date(S.synced).toLocaleString())}`:"Not synced yet"} · ${queue().length} waiting to upload</p><div class="links"><button class="btn" data-act="syncnow">Sync now</button><button class="btn danger" data-act="forget">Remove token from this phone</button></div></div>`:""}`;
 }
 async function connect(){
@@ -1163,6 +1212,9 @@ document.addEventListener("click", async ev=>{
   if(a==="savereceipt") return saveReceipt();
   if(a==="pickline"){ const i=+t.dataset.i; return openPicker(id=>{ const l=RC.lines[i]; l.item=id; l.how="chosen"; const it=itemById(id); if(it.basis==="unit"){ l.count = l.size && !l.unit ? l.count : (l.count||""); } renderReceipt(); }, RC.lines[i].name.split(" ")[0]); }
   if(a==="savecfg") return connect();
+  if(a==="importfile") return importFile();
+  if(a==="saveshop") return saveShop(t.dataset.id);
+  if(a==="newshopfromlist"){ return openStorePicker(id=>{ location.hash="shopedit/"+encodeURIComponent(id); }); }
   if(a==="syncnow"){ toast("Syncing…"); await sync(); toast(S.error||"Synced"); render(); return; }
   if(a==="forget"){ if(confirm("Remove the token from this phone? Your data on GitHub stays safe.")){ cfg.token=""; saveCfg(); render(); } return; }
   if(a==="savenames"){ const next={user1:$("#n1").value.trim()||DEFAULT_PEOPLE.user1, user2:$("#n2").value.trim()||DEFAULT_PEOPLE.user2}; try{ await saveJson("people.json",next,"Rename people"); S.people=next; saveCache(); toast("Names saved"); renderSettings(false); }catch(e){ toast(e.message); } return; }

@@ -16,6 +16,8 @@ App link (after GitHub Pages is on): https://pinghsuanlin.github.io/grocery-trac
 
 - **Fair comparisons:** verdicts use the last 12 months of prices when there are at least 3, so inflation doesn't make today's prices look expensive. Each shop has a country (Spain unless you choose otherwise when adding it); prices are only compared within the same country, and item pages have a switch when an item was bought in more than one.
 - **Safety checks:** a price 3× above or below your usual for that item asks "Save anyway?" (usually a typo, or g vs kg). Saving a receipt that's already saved (same shop and date, same total or mostly the same lines), or the same purchase twice, asks first.
+- **Shops screen:** Home → Shops lists every shop by country; tap one to change its name, kind, country or receipt words.
+- **Import a file:** Settings → Import purchases from a file adds rows from a CSV in the app's format (e.g. an old log). Rows already in your data are skipped.
 - **Large files:** works with data files over 1 MB (GitHub's limit for normal reads), up to 100 MB.
 
 - **Is this a good price?** At the shelf, pick the item and type the price and size (or the weight and €/kg). The tag shows the unit price and a verdict against your own history: *Best price yet*, *Great deal* (within 5% of your best), *Good* (cheaper than 75% of your purchases), *Typical*, or *Expensive* (pricier than 75%). Tap *Log this purchase* to save it.
