@@ -133,7 +133,7 @@ details.more{margin-top:12px} details.more summary{font-weight:600;min-height:36
 <div id="barhost"></div>
 <script>
 /*CORE-START*/
-const LOG_HEADER = "id,date,store,item,product,brand,own_label,pack_count,pack_size,pack_unit,packs,weight,price_paid,currency,rate,price_eur,qty_basis,unit_price_eur,promo,person,source,photo,notes,value";
+const LOG_HEADER = "id,date,store,item,product,brand,own_label,pack_count,pack_size,pack_unit,packs,weight,price_paid,currency,rate,price_eur,qty_basis,unit_price_eur,promo,person,source,photo,notes,value,bought";
 
 /* ---------- numbers & formatting ---------- */
 // Accepts "2,99", "2.99", "1.234,56", "1,234.56", "€ 3", "3 €"
@@ -412,10 +412,39 @@ const LS={ get(k,d){ try{ const v=localStorage.getItem(PFX+k); return v==null?d:
 const cfg=Object.assign({owner:"Pinghsuanlin", repo:"grocery-log", branch:"main", token:"", person:"user1", tokenExpires:"", currency:"EUR"}, LS.get("cfg",{}));
 function saveCfg(){ LS.set("cfg",cfg); }
 const DEFAULT_PEOPLE={user1:"Person 1", user2:"Person 2"};
-const S={ items:[], cats:[], stores:[], mappings:{byStore:{}}, purchases:[], people:{...DEFAULT_PEOPLE}, synced:null, error:null };
+const S={ items:[], cats:[], stores:[], mappings:{byStore:{}}, purchases:[], people:{...DEFAULT_PEOPLE}, settings:{}, synced:null, error:null };
 const CK=k=>`cache_${cfg.owner}_${cfg.repo}_${k}`;
-function loadCache(){ for(const k of ["items","cats","stores","mappings","purchases","people","synced"]){ const v=LS.get(CK(k),null); if(v!=null) S[k]=v; } }
-function saveCache(){ for(const k of ["items","cats","stores","mappings","purchases","people","synced"]) LS.set(CK(k),S[k]); }
+/* ---- IndexedDB: the offline copy (much more room than localStorage; falls back to it if unavailable) ---- */
+const IDB=(()=>{ let dbp=null;
+  const open=()=> dbp || (dbp=new Promise(res=>{ try{ const r=indexedDB.open("grocery-app",1); r.onupgradeneeded=()=>r.result.createObjectStore("kv"); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); r.onblocked=()=>res(null); }catch(e){ res(null); } }));
+  const run=async(mode,fn)=>{ const db=await open(); if(!db) return undefined; return new Promise(res=>{ try{ const t=db.transaction("kv",mode); const q=fn(t.objectStore("kv")); t.oncomplete=()=>res(q?q.result:undefined); t.onerror=()=>res(undefined); t.onabort=()=>res(undefined); }catch(e){ res(undefined); } }); };
+  return { ok:async()=>!!(await open()), get:k=>run("readonly",s=>s.get(k)), set:(k,v)=>run("readwrite",s=>s.put(v,k)), del:k=>run("readwrite",s=>s.delete(k)) };
+})();
+const CACHE_KEYS=["items","cats","stores","mappings","people","settings","synced","itemsVersion","storesVersion","files"];
+let FC={};   /* GitHub files as last downloaded: path -> {sha, text} */
+const isPurchaseFile=p=>p==="purchases.csv"||/^purchases\/\d{4}\.csv$/.test(p);
+const yearPath=date=>`purchases/${String(date||localISO()).slice(0,4)}.csv`;
+async function loadCache(){
+  const idb=await IDB.ok();
+  for(const k of CACHE_KEYS){
+    let v= idb ? await IDB.get(CK(k)) : undefined;
+    if(v===undefined || v===null){ const old=LS.get(CK(k),null); if(old!=null){ v=old; if(idb){ await IDB.set(CK(k),old); LS.del(CK(k)); } } }
+    if(v!=null){ if(k==="files") FC=v; else S[k]=v; }
+  }
+  const oldP=LS.get(CK("purchases"),null);                 /* the copy kept before yearly files: only until the first sync */
+  if(Object.keys(FC).some(isPurchaseFile)) rebuildPurchases(); else if(oldP) S.purchases=oldP;
+  if(oldP!=null && idb) LS.del(CK("purchases"));
+}
+function rebuildPurchases(){
+  const out=[];
+  for(const path of Object.keys(FC).filter(isPurchaseFile).sort()) for(const r of csvParse(FC[path].text||"")){ const x=numRow(r); x.__file=path; out.push(x); }
+  for(const q of queue()) if(q.kind==="purchases") out.push(...csvParse(LOG_HEADER+"\n"+q.lines.join("\n")+"\n").map(numRow));
+  S.purchases=out;
+}
+function saveCache(){
+  const snap={}; for(const k of CACHE_KEYS) snap[k]= k==="files" ? FC : S[k];
+  (async()=>{ const idb=await IDB.ok(); for(const [k,v] of Object.entries(snap)){ if(idb) await IDB.set(CK(k), v); else LS.set(CK(k), v); } })();
+}
 const queueKey=()=>CK("queue"); const queue=()=>LS.get(queueKey(),[]); const setQueue=q=>LS.set(queueKey(),q);
 
 /* ===================== GITHUB ===================== */
@@ -452,8 +481,18 @@ const ghPut=(path,text,sha,msg)=>ghPutRaw(path,b64e(text),sha,msg);
 /* read-modify-write with retries if the other phone wrote at the same time */
 async function ghUpdate(path, fn, message){
   for(let a=0;a<3;a++){ const f=await ghGet(path); const next=fn(f?f.text:null);
-    try{ await ghPut(path,next,f?f.sha:undefined,message); return next; } catch(e){ if(e.status===409||e.status===422) continue; throw e; } }
+    try{ const sha=await ghPut(path,next,f?f.sha:undefined,message); FC[path]={sha,text:next}; return next; } catch(e){ if(e.status===409||e.status===422) continue; throw e; } }
   throw new Error("Couldn't save after 3 tries because the file kept changing. Try again.");
+}
+/* list a folder: names, types and IDs (sha) without downloading anything */
+async function ghList(dir){ const r=await gh(dir); if(r.status===404) return []; if(!r.ok) throw new Error(await ghErr(r)); const j=await r.json(); return Array.isArray(j)?j:[]; }
+/* download a file only if it changed since last time */
+async function fetchFile(path, sha){ if(FC[path] && FC[path].sha===sha) return FC[path].text; const f=await ghGet(path); if(!f){ delete FC[path]; return null; } FC[path]={sha:f.sha, text:f.text}; return f.text; }
+/* add lines to a file, reusing its known ID (one request); if the other phone changed it, read it again first */
+async function appendTo(path, lines, message){
+  const c=FC[path];
+  if(c && c.sha){ const next=appendLines(c.text, lines); try{ const sha=await ghPut(path,next,c.sha,message); FC[path]={sha,text:next}; return; }catch(e){ if(!(e.status===409||e.status===422)) throw e; } }
+  await ghUpdate(path, t=>appendLines(t,lines), message);
 }
 function appendLines(existing, lines){ let t=existing&&existing.trim()?existing:LOG_HEADER+"\n"; const first=t.split(/\r?\n/)[0];
   if(first!==LOG_HEADER){ const cols=LOG_HEADER.split(","); t=LOG_HEADER+"\n"+csvParse(t).map(r=>csvLine(cols.map(c=>r[c]??""))).map(l=>l+"\n").join(""); }
@@ -465,40 +504,83 @@ async function ghImage(path){
 }
 const imgMem={};
 
+/* ===================== DATA UPDATES (applied to your files once, keeping your own edits) ===================== */
+const KITCHENWARE=[["pot","Pot","Olla","湯鍋"],["frying_pan","Frying pan","Sartén","平底鍋"],["saucepan","Saucepan","Cazo","小湯鍋"],["serving_ladle","Serving ladle","Cucharón","湯勺・公杓"],
+ ["serving_spoon","Serving spoon","Cuchara de servir","公匙"],["spatula","Spatula","Espátula","鍋鏟"],["kitchen_knife","Kitchen knife","Cuchillo de cocina","菜刀"],["cutting_board","Cutting board","Tabla de cortar","砧板"],
+ ["food_containers","Food containers","Táperes","保鮮盒"],["mixing_bowl","Mixing bowl","Bol","調理碗"],["cutlery","Cutlery","Cubiertos","餐具"],["grater","Grater","Rallador","刨絲器"],
+ ["baking_tray","Baking tray","Bandeja de horno","烤盤"],["chopsticks","Chopsticks","Palillos","筷子"],["kitchen_utensil","Other kitchen utensil","Utensilio de cocina","其他廚具"]];
+const MOVE_CAT={cleaning:["laundry_detergent","fabric_softener","dish_soap","dishwasher_tabs","bleach","multi_cleaner","degreaser","sponges","nitrile_gloves","rubber_gloves","cleaning_alcohol","clothes_pegs"],
+ paper:["toilet_paper","kitchen_roll","foil","baking_paper","bin_bags"]};
+function migrateItems(d){
+  if((d.version||1)>=3) return false;
+  const cats=d.categories||[]; const add=(c,i)=>{ if(!cats.some(x=>x.id===c.id)) cats.splice(i,0,c); };
+  const hi=Math.max(0,cats.findIndex(c=>c.id==="household"));
+  add({id:"cleaning",en:"Cleaning & laundry",es:"Limpieza y lavado",zh:"清潔洗衣"},hi); add({id:"paper",en:"Paper & disposables",es:"Papel y desechables",zh:"紙品與耗材"},hi+1); add({id:"kitchenware",en:"Kitchenware",es:"Menaje de cocina",zh:"廚具"},hi+2);
+  const h=cats.find(c=>c.id==="household"); if(h){ h.en="Other household"; h.es="Otros del hogar"; h.zh="其他家用"; }
+  for(const [cat,ids] of Object.entries(MOVE_CAT)) for(const it of d.items) if(ids.includes(it.id) && (it.cat==="household"||!it.cat)) it.cat=cat;
+  for(const [id,en,es,zh] of KITCHENWARE) if(!d.items.some(x=>x.id===id)) d.items.push({id,en,es,zh,cat:"kitchenware",basis:"unit",unit:{en:id==="chopsticks"?"pair":id==="cutlery"||id==="food_containers"?"set":"piece",es:"unidad",zh:"個"}});
+  d.categories=cats; d.version=3; return true;
+}
+function migrateStores(d){
+  if((d.version||1)>=2) return false;
+  for(const st of d.stores){ if(["iberochina","asian"].includes(st.id) && ["supermarket","own",undefined].includes(st.type)) st.type="asian"; }
+  d.version=2; return true;
+}
+async function applyDataUpdates(){
+  try{
+    const di={categories:S.cats, items:S.items, version:S.itemsVersion||1};
+    if((S.itemsVersion||1)<3){ const t=await ghUpdate("items.json", text=>{ const d=JSON.parse(text); migrateItems(d); return JSON.stringify(d,null,1)+"\n"; }, "Update household categories and add kitchenware");
+      const d=JSON.parse(t); S.items=d.items; S.cats=d.categories; S.itemsVersion=d.version; }
+    if((S.storesVersion||1)<2){ const t=await ghUpdate("stores.json", text=>{ const d=JSON.parse(text); migrateStores(d); return JSON.stringify(d,null,1)+"\n"; }, "Mark Asian shops");
+      const d=JSON.parse(t); S.stores=d.stores; S.storesVersion=d.version; }
+    saveCache();
+  }catch(e){ /* tried again on the next sync */ }
+}
+
 /* ===================== SYNC ===================== */
 function numRow(p){ for(const k of ["pack_count","pack_size","packs","weight","price_paid","rate","price_eur","qty_basis","unit_price_eur","value"]) p[k]=p[k]===""||p[k]==null?null:parseNum(p[k]); return p; }
 async function sync(){
   if(!cfg.token) return;
   try{
     await flushQueue();
-    const [it,st,mp,pu,pe]=await Promise.all([ghGet("items.json"),ghGet("stores.json"),ghGet("mappings.json"),ghGet("purchases.csv"),ghGet("people.json")]);
-    if(!it||!st) throw new Error(`items.json or stores.json is missing in ${cfg.repo}. Upload the grocery-log files first.`);
-    const items=JSON.parse(it.text); S.items=items.items; S.cats=items.categories;
-    S.stores=JSON.parse(st.text).stores; S.mappings=mp?JSON.parse(mp.text):{byStore:{}};
-    S.purchases=(pu?csvParse(pu.text):[]).map(numRow);
-    for(const q of queue()) if(q.kind==="purchases") S.purchases.push(...csvParse(LOG_HEADER+"\n"+q.lines.join("\n")+"\n").map(numRow));
-    S.people=Object.assign({...DEFAULT_PEOPLE}, pe?JSON.parse(pe.text):{});
+    const root=await ghList(""); const sha=n=>{ const f=root.find(x=>x.name===n && x.type==="file"); return f?f.sha:null; };
+    const years = root.some(x=>x.name==="purchases" && x.type==="dir") ? (await ghList("purchases")).filter(x=>x.type==="file" && /^\d{4}\.csv$/.test(x.name)) : [];
+    const want=[...["items.json","stores.json","mappings.json","people.json","settings.json","purchases.csv"].map(n=>[n,sha(n)]), ...years.map(x=>[`purchases/${x.name}`, x.sha])].filter(([,s])=>s);
+    for(const p of Object.keys(FC)) if(!want.some(([q])=>q===p)) delete FC[p];
+    const txt={}; await Promise.all(want.map(async([p,s])=>{ txt[p]=await fetchFile(p,s); }));
+    if(!txt["items.json"]||!txt["stores.json"]) throw new Error(`items.json or stores.json is missing in ${cfg.repo}. Upload the grocery-log files first.`);
+    S.settings = txt["settings.json"] ? (()=>{ try{ return JSON.parse(txt["settings.json"])||{}; }catch(e){ return {}; } })() : {};
+    const items=JSON.parse(txt["items.json"]); S.items=items.items; S.cats=items.categories; S.itemsVersion=items.version||1;
+    const stores=JSON.parse(txt["stores.json"]); S.stores=stores.stores; S.storesVersion=stores.version||1;
+    S.mappings=txt["mappings.json"]?JSON.parse(txt["mappings.json"]):{byStore:{}};
+    S.people=Object.assign({...DEFAULT_PEOPLE}, txt["people.json"]?JSON.parse(txt["people.json"]):{});
+    rebuildPurchases();
     S.synced=new Date().toISOString(); S.error=null; saveCache();
+    if((S.itemsVersion||1)<3 || (S.storesVersion||1)<2) await applyDataUpdates();
   }catch(e){ S.error = navigator.onLine ? e.message : "Offline: showing the last saved copy."; }
 }
-async function flushQueue(){ const q=queue(); let i=0; for(;i<q.length;i++){ try{ await ghUpdate("purchases.csv", t=>appendLines(t,q[i].lines), q[i].message); }catch(e){ break; } } setQueue(q.slice(i)); }
+async function flushQueue(){ const q=queue(); let i=0; for(;i<q.length;i++){ try{ await appendTo(q[i].path||"purchases.csv", q[i].lines, q[i].message); }catch(e){ break; } } setQueue(q.slice(i)); if(i){ rebuildPurchases(); saveCache(); } }
 window.addEventListener("online",()=>{ flushQueue().then(()=>render()); });
 async function savePurchases(rows, message){
-  const lines=rows.map(rowToLine);
-  try{
-    if(!cfg.token) throw new Error("no token");
-    const text=await ghUpdate("purchases.csv", t=>appendLines(t,lines), message);
-    S.purchases=csvParse(text).map(numRow); saveCache(); return {ok:true,text:"Saved to GitHub"};
-  }catch(e){
-    const q=queue(); q.push({kind:"purchases",lines,message}); setQueue(q); S.purchases.push(...rows.map(r=>numRow({...r}))); saveCache();
-    return {ok:false,text:`${!navigator.onLine?"No connection":e.message}. Saved on this phone; it uploads automatically later.`};
+  const groups={}; for(const r of rows){ const p=yearPath(r.date); (groups[p]=groups[p]||[]).push(rowToLine(r)); }   /* each row goes into its year's file */
+  const failed=[]; let err=null;
+  for(const [path,lines] of Object.entries(groups)){
+    try{ if(!cfg.token) throw new Error("no token"); await appendTo(path, lines, message); }
+    catch(e){ err=e; failed.push({kind:"purchases", path, lines, message}); }
   }
+  if(failed.length){ const q=queue(); q.push(...failed); setQueue(q); }
+  rebuildPurchases(); saveCache();
+  return failed.length ? {ok:false, text:`${!navigator.onLine?"No connection":err.message}. Saved on this phone; it uploads automatically later.`} : {ok:true, text:"Saved to GitHub"};
 }
 async function rewritePurchases(mutate, message){
   if(!navigator.onLine) throw new Error("Editing needs a connection. Try again with signal.");
-  if(queue().length){ await flushQueue(); if(queue().length) throw new Error("Some purchases are still waiting to upload. Sync first, then edit."); }
-  const text=await ghUpdate("purchases.csv", t=>{ const rows=mutate(csvParse(t||LOG_HEADER+"\n")); return LOG_HEADER+"\n"+rows.map(rowToLine).join("\n")+(rows.length?"\n":""); }, message);
-  S.purchases=csvParse(text).map(numRow); saveCache();
+  if(queue().length){ await flushQueue(); if(queue().length) throw new Error("Some prices are still waiting to upload. Sync first, then edit."); }
+  for(const path of Object.keys(FC).filter(isPurchaseFile)){      /* only files that hold a changed row are rewritten */
+    const before=csvParse(FC[path].text||""); const after=mutate(before.map(r=>({...r})));
+    if(after.length===before.length && after.every((r,i)=>rowToLine(r)===rowToLine(before[i]))) continue;
+    await ghUpdate(path, t=>{ const rows=mutate(csvParse(t||LOG_HEADER+"\n")); return LOG_HEADER+"\n"+rows.map(rowToLine).join("\n")+(rows.length?"\n":""); }, message);
+  }
+  rebuildPurchases(); saveCache();
 }
 async function saveJson(path, obj, message){ await ghUpdate(path, ()=>JSON.stringify(obj,null,1)+"\n", message); }
 async function addStore(name, kind, country){
@@ -528,8 +610,8 @@ async function uploadPhoto(file, id){
 
 /* ===================== CURRENCIES ===================== */
 const CURRENCIES=["EUR","USD","GBP","TWD","JPY"];
-const SHOP_KINDS={asian:"Asian supermarket",supermarket:"Supermarket",discount:"Supermarket",hypermarket:"Supermarket",wholesale:"Wholesale",online:"Online",rescue:"Food-rescue app",market:"Market",greengrocer:"Speciality shop",butcher:"Speciality shop",fishmonger:"Speciality shop",diy:"DIY & home",home:"DIY & home",own:"Shop"};
-const NEW_SHOP_KINDS=[["supermarket","Supermarket"],["asian","Asian supermarket"],["online","Online"],["market","Market"],["greengrocer","Speciality shop"],["rescue","Food-rescue app"],["diy","DIY & home"]];
+const SHOP_KINDS={asian:"Asian shop",supermarket:"Supermarket",discount:"Supermarket",hypermarket:"Supermarket",wholesale:"Wholesale",online:"Online",rescue:"Food-rescue app",market:"Market",greengrocer:"Speciality shop",butcher:"Speciality shop",fishmonger:"Speciality shop",diy:"DIY & home",home:"DIY & home",own:"Shop"};
+const NEW_SHOP_KINDS=[["supermarket","Supermarket"],["asian","Asian shop"],["online","Online"],["market","Market"],["greengrocer","Speciality shop"],["rescue","Food-rescue app"],["diy","DIY & home"]];
 /* 1 EUR = rate × currency, on the purchase date (daily reference rates; earliest 2024-03-02) */
 async function rateFor(cur, date){
   if(cur==="EUR") return 1;
@@ -559,6 +641,8 @@ function storeCountry(id){ const st=storeById(id); return (st&&st.country)||HOME
 function yearAgo(){ const d=new Date(); d.setFullYear(d.getFullYear()-1); return localISO(d); }
 /* history for verdicts: same country as the shop (home country if none), last 12 months when there are 3+ prices */
 function H(itemId, exceptId, storeId){ const c=storeId?storeCountry(storeId):HOME; return historyFor(itemId, S.items.filter(x=>!x.nocompare), S.purchases, exceptId, {since:yearAgo(), keep:p=>storeCountry(p.store)===c}); }
+/* spending counts only what you bought, from the "count spending from" date on (shared setting) */
+const isBought=p=>String(p.bought??"")!=="0" && (!S.settings.spendFrom || (p.date||"")>=S.settings.spendFrom);
 function brandOf(p){ if(p.brand) return p.brand; const d=detectBrand(p.product||""); return d?d.brand:""; }
 function ownOf(p){ const o=String(p.own_label??""); if(o==="1"||o==="true") return true; if(o==="0"||o==="false") return false; const b=brandOf(p); return b?isOwnLabel(b):false; }
 const comparable=p=>{ const it=itemById(p.item); return !!it && !it.nocompare && p.unit_price_eur>0; };
@@ -665,15 +749,15 @@ function renderHome(){
   <p class="status ${S.error?"bad":""}">${S.error?esc(S.error):S.synced?`Synced ${esc(niceDate(S.synced.slice(0,10)))}`:"Not synced yet"}${q?` · ${q} waiting to upload`:""}</p>
   ${tokenBanner()}
   <button class="pricetag cta" data-go="check"><span class="what">At the shelf</span><div class="big">Is this a good price?</div><div class="note">Type the price and size to compare it with what you've paid before.</div></button>
-  <div class="links"><button class="btn primary" data-go="log">Log a purchase</button><button class="btn" data-go="receipt">Add from a receipt</button></div>
+  <div class="links"><button class="btn primary" data-go="log">Log a price</button><button class="btn" data-go="receipt">Add from a receipt</button></div>
   <div class="card"><label class="f" for="h_q" style="margin-top:0">Find an item</label><input class="t" id="h_q" type="search" placeholder="Leche, milk, 牛奶…" autocomplete="off"><div id="h_res" class="list"></div></div>
-  <div class="card"><h2 class="sec">Recent purchases</h2>${recent.length?`<div class="list">${recent.map(purchaseLi).join("")}</div><p><button class="btn small" data-go="purchases">All purchases</button></p>`:`<p class="empty">Nothing logged yet. Log a purchase or add a receipt to start.</p>`}</div>
+  <div class="card"><h2 class="sec">Recent prices</h2>${recent.length?`<div class="list">${recent.map(purchaseLi).join("")}</div><p><button class="btn small" data-go="purchases">All prices</button></p>`:`<p class="empty">Nothing logged yet. Log a price or add a receipt to start.</p>`}</div>
   <div class="links"><button class="btn" data-go="stores">Compare shops</button><button class="btn" data-go="items">All items</button><button class="btn" data-go="shops">Shops</button></div>`;
 }
 function purchaseLi(p){
   const it=itemById(p.item); const b=brandOf(p);
   const v= it&&it.nocompare ? {kind:"typical"} : verdict(p.unit_price_eur, H(p.item,p.id,p.store).values);
-  return `<button class="li" data-go="item/${encodeURIComponent(p.item)}"><span><span class="dot k-${v.kind==="none"||v.kind==="new"?"typical":v.kind}" aria-hidden="true"></span><b>${esc(it?disp(it):p.item)}</b> <span class="zh">${esc(it?it.zh:"")}</span><br><span class="sub">${esc(storeName(p.store))} · ${esc(niceDate(p.date))}${b?` · ${esc(b)}${ownOf(p)?` <span class="tagpill">own label</span>`:""}`:""}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span>
+  return `<button class="li" data-go="item/${encodeURIComponent(p.item)}"><span><span class="dot k-${v.kind==="none"||v.kind==="new"?"typical":v.kind}" aria-hidden="true"></span><b>${esc(it?disp(it):p.item)}</b> <span class="zh">${esc(it?it.zh:"")}</span><br><span class="sub">${esc(storeName(p.store))} · ${esc(niceDate(p.date))}${b?` · ${esc(b)}${ownOf(p)?` <span class="tagpill">own label</span>`:""}`:""}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}${isBought(p)?"":` · <span class="tagpill">noted</span>`}</span></span>
    <span class="r">${it&&it.nocompare?"":esc(fmtUnitPrice(p.unit_price_eur, it?it.basis:"unit", unitWord(it)))}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`;
 }
 function itemLi(it){
@@ -685,7 +769,7 @@ function itemLi(it){
 }
 /* ===================== CHECK / LOG / EDIT FORM ===================== */
 let F=null;   // the form being filled
-function blankForm(itemId){ return {item:itemId||"", store:"", date:localISO(), product:"", brand:"", own:"", mode:"pack", pack_count:1, pack_size:"", pack_unit:"", packs:1, price_pack:"", promo:"", pct:"", weight:"", weight_unit:"", per_kg:"", total:"", value:"", currency:cfg.currency||"EUR", rate:1, notes:"", photo:"", photoFile:null, id:null}; }
+function blankForm(itemId){ return {bought:"1", item:itemId||"", store:"", date:localISO(), product:"", brand:"", own:"", mode:"pack", pack_count:1, pack_size:"", pack_unit:"", packs:1, price_pack:"", promo:"", pct:"", weight:"", weight_unit:"", per_kg:"", total:"", value:"", currency:cfg.currency||"EUR", rate:1, notes:"", photo:"", photoFile:null, id:null}; }
 function defaultUnit(it){ return !it?"":it.basis==="unit"?"unit":it.basis==="L"?"ml":"g"; }
 function storeBtn(sel, act){ const st=storeById(sel); return `<button class="pickbtn ${st?"set":""}" data-act="${act}">${st?`${esc(st.name)} <span class="zh">${esc(SHOP_KINDS[st.type]||"")}</span>`:"Choose or add a shop…"}</button>`; }
 function brandList(itemId){ const fam=new Set([itemId]); const it=itemById(itemId); if(it&&it.type) familyIds(it.type,S.items).forEach(x=>fam.add(x)); const seen=new Set();
@@ -696,11 +780,12 @@ function renderForm(kind, arg){
   F._kind=kind; F._carry=false;
   const it=itemById(F.item);
   if(it && !F.pack_unit) F.pack_unit=defaultUnit(it);
-  const title = kind==="check"?"Check a price":kind==="edit"?"Edit purchase":"Log a purchase";
+  const title = kind==="check"?"Check a price":kind==="edit"?"Edit price":"Log a price";
   const unitOpts = it&&it.basis==="unit" ? [["unit",unitWord(it)+"s"]] : it&&it.basis==="L" ? [["ml","ml"],["cl","cl"],["L","L"]] : [["g","g"],["kg","kg"]];
   const own = F.own==="1" || (F.own===""&&F.brand&&isOwnLabel(F.brand));
   $("#app").innerHTML=`${topbar(title, kind==="edit"?"item/"+encodeURIComponent(F.item):"home")}
   <div class="card">
+    ${kind!=="check"?`<div class="seg" role="group" aria-label="Bought or noted" style="margin-bottom:10px"><button data-act="bought" data-v="1" aria-pressed="${F.bought!=="0"}">Bought it</button><button data-act="bought" data-v="0" aria-pressed="${F.bought==="0"}">Just noting the price</button></div>`:""}
     <label class="f" style="margin-top:0">Item</label>
     <button class="pickbtn ${it?"set":""}" data-act="pickitem">${it?`${esc(disp(it))} <span class="zh">${esc(it.zh)} · ${esc(it.es)}</span>`:"Choose or add an item…"}</button>
     <label class="f">Shop${kind==="check"?` <span class="sub">(optional)</span>`:""}</label>${storeBtn(F.store,"pickstore")}
@@ -737,9 +822,9 @@ function renderForm(kind, arg){
     <label class="f" for="f_photo">Photo <span class="sub">(optional: label or receipt)</span></label><input id="f_photo" type="file" accept="image/*" capture="environment">${F.photo?`<p class="sub small">Saved photo: ${esc(F.photo)}</p>`:""}</div>`:""}`;
   updateResult();
   if(F.currency!=="EUR" && !(F.rate>0)) lookupRate();
-  setBar(kind==="check" ? `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="checktolog">Log this purchase</button>`
+  setBar(kind==="check" ? `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="checktolog">Log this price</button>`
        : kind==="edit" ? `<button class="btn danger" data-act="delpurchase">Delete</button><button class="btn primary" data-act="savepurchase">Save changes</button>`
-       : `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="savepurchase">Save purchase</button>`);
+       : `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="savepurchase">Save price</button>`);
 }
 function formFields(){ const f={...F}; for(const k of ["pack_count","pack_size","packs","price_pack","pct","weight","per_kg","total","rate","value"]) f[k]=parseNum(F[k]); return f; }
 function updateResult(){
@@ -760,7 +845,7 @@ function formFromPurchase(p){
   return {...blankForm(p.item), id:p.id, store:p.store, date:p.date, product:p.product||"", brand:p.brand||"", own:String(p.own_label??""), mode:p.weight>0?"weight":"pack", pack_count:p.pack_count||1, pack_size:p.pack_size||"", pack_unit:p.pack_unit||defaultUnit(it), packs:p.packs||1,
     price_pack: it.nocompare ? p.price_paid : (p.weight>0?"": round(p.price_paid/((p.packs||1)*promoFactor(isPct?"pct":p.promo, parseNum(pc.split(":")[1]))),2)),
     promo:isPct?"pct":(["2x1","3x2","2nd50","2nd70"].includes(pc)?pc:""), pct:isPct?pc.split(":")[1]:"",
-    weight:p.weight||"", weight_unit: it.basis==="L"?"L":"kg", total:p.weight>0?p.price_paid:"", value:p.value||"", currency:p.currency||"EUR", rate:p.rate||1, notes:p.notes||"", photo:p.photo||""};
+    bought: String(p.bought??"")==="0"?"0":"1", weight:p.weight||"", weight_unit: it.basis==="L"?"L":"kg", total:p.weight>0?p.price_paid:"", value:p.value||"", currency:p.currency||"EUR", rate:p.rate||1, notes:p.notes||"", photo:p.photo||""};
 }
 function rowFromForm(c, extra={}){
   const f=formFields(); const ny=c.it.nocompare;
@@ -771,7 +856,7 @@ function rowFromForm(c, extra={}){
     pack_count: !ny&&F.mode==="pack"?(f.pack_count||1):"", pack_size: !ny&&F.mode==="pack"&&c.it.basis!=="unit"?(f.pack_size||""):"", pack_unit: !ny&&F.mode==="pack"?(F.pack_unit||defaultUnit(c.it)):"", packs: ny?1:F.mode==="pack"?(f.packs||1):"",
     weight: !ny&&F.mode==="weight"? round(c.qty,3):"", price_paid:round(c.paid,2), currency:F.currency||"EUR", rate:c.rate===1?1:round(c.rate,6), price_eur:round(c.eur,2), qty_basis:round(c.qty,4),
     unit_price_eur: ny?"":round(c.up,4), promo: !ny&&F.mode==="pack" ? (F.promo==="pct"?`pct:${f.pct||0}`:F.promo||"") : "", person:cfg.person, source:extra.source||"typed", photo:extra.photo||F.photo||"", notes:F.notes||"",
-    value: ny && f.value>0 ? round(f.value,2) : ""};
+    value: ny && f.value>0 ? round(f.value,2) : "", bought: F.bought==="0" ? 0 : 1};
 }
 async function savePurchaseForm(){
   if(!F.store){ toast("Choose the shop."); return; }
@@ -988,7 +1073,7 @@ async function saveReceipt(){
     const bd=detectBrand(l.name);
     return {id:newId(), date:RC.date, store:RC.store, item:l.item, product:l.name, brand:bd?bd.brand:"", own_label:bd?(bd.own?1:0):"", pack_count: byW?"":(parseNum(l.count)||1), pack_size: byW||it.basis==="unit"?"":(parseNum(l.size)||""), pack_unit: byW?"":(it.basis==="unit"?"unit":(l.unit||(it.basis==="L"?"ml":"g"))),
       packs: byW?"":(parseNum(l.qty)||1), weight: byW?round(c.qty,3):"", price_paid:round(c.total,2), currency:RC.currency, rate:c.rate===1?1:round(c.rate,6), price_eur:round(c.eur,2), qty_basis:round(c.qty,4),
-      unit_price_eur:round(c.up,4), promo: l.discount?"discount":"", person:cfg.person, source:"receipt:"+rid, photo, notes:""}; });
+      unit_price_eur:round(c.up,4), promo: l.discount?"discount":"", person:cfg.person, source:"receipt:"+rid, photo, notes:"", bought:1}; });
   const res=await savePurchases(rows, `${S.people[cfg.person]||cfg.person}: receipt from ${storeName(RC.store)} ${RC.date}`);
   const mem=use.filter(l=>l.item).map(l=>({key:normLine(l.name), memo:{item:l.item, size: l.weight!=null&&l.weight!=="" ? null : {pack_count:parseNum(l.count)||1, pack_size:parseNum(l.size)||null, pack_unit: itemById(l.item).basis==="unit"?"unit":(l.unit||null)}}}));
   await rememberMappings(RC.store, mem);
@@ -1003,7 +1088,7 @@ let itemCountry="ES", itemCountryFor=null;
 function renderItem(id){
   const it=itemById(id); if(!it){ location.hash="items"; return; }
   if(it.nocompare) return renderBagItem(it);
-  setBar(`<button class="btn" data-act="checkitem" data-id="${esc(id)}">Check a price</button><button class="btn primary" data-act="logitem" data-id="${esc(id)}">Log a purchase</button>`);
+  setBar(`<button class="btn" data-act="checkitem" data-id="${esc(id)}">Check a price</button><button class="btn primary" data-act="logitem" data-id="${esc(id)}">Log a price</button>`);
   const fam = isType(it) ? familyIds(it.id, S.items) : [it.id];
   const famPs=S.purchases.filter(p=>fam.includes(p.item));
   const ctys=[...new Set(famPs.map(p=>storeCountry(p.store)))];
@@ -1023,7 +1108,7 @@ function renderItem(id){
   $("#app").innerHTML=`${topbar(disp(it),"home")}${ctySwitch}<p class="sub">${esc(it.es)} · ${esc(it.zh)} · compared per ${esc(unitWord(it))}${parent?` · <button class="linkbtn" data-go="item/${encodeURIComponent(parent.id)}">All ${esc(parent.en.toLowerCase())}</button>`:""}</p>
   ${best?`<div class="pricetag"><span class="sticker k-great">Best price</span><div class="what">${esc(storeName(best.store))} · ${esc(niceDate(best.date))}${fam.length>1&&best.item!==it.id?` · ${esc(disp(itemById(best.item)))}`:""}${brandOf(best)?` · ${esc(brandOf(best))}`:""}</div><div class="big">${esc(U(best.unit_price_eur))}</div>
     <div class="note">Typical ${esc(U(s.median))} · last ${esc(U(last.unit_price_eur))} at ${esc(storeName(last.store))} · ${s.n} purchase${s.n===1?"":"s"}</div></div>`
-   :`<p class="empty">No prices yet. Log a purchase or check a price at the shelf.</p>`}
+   :`<p class="empty">No prices yet. Log a price or check one at the shelf.</p>`}
   ${subs.length?`<div class="card"><h2 class="sec">By type</h2>${groupTable(subs.map(r=>{ const x=itemById(r.k); return {name:`<button class="linkbtn" data-go="item/${encodeURIComponent(r.k)}">${esc(x.id===it.id?"Not specified":(x.sub?x.sub.en:x.en))}</button>`, extra:`${r.s.n}× · last ${esc(niceDate(r.last.date))}`, s:r.s}; }),U,"Type")}</div>`:""}
   ${s.n>=2 && !isType(it)?`<div class="card"><h2 class="sec">What counts as a good price</h2><table class="t2">
      <tr><td><span class="dot k-great"></span>Great deal</td><td class="n">≤ ${esc(U(s.best*1.05))}</td></tr>
@@ -1033,7 +1118,7 @@ function renderItem(id){
   ${ps.length?`<div class="card"><h2 class="sec">By shop</h2>${groupTable(byKey(ps,p=>p.store).map(r=>({name:esc(storeName(r.k)), extra:`last ${esc(niceDate(r.last.date))} · ${r.s.n}×`, s:r.s})),U,"Shop")}</div>`:""}
   ${brands.length>1||(brands[0]&&brands[0].k!=="—")?`<div class="card"><h2 class="sec">By brand</h2>${ownLine}${groupTable(brands.map(r=>({name:`${esc(r.k)}${r.v.some(ownOf)?` <span class="tagpill">own label</span>`:""}`, extra:`${r.s.n}× · ${esc([...new Set(r.v.map(p=>storeName(p.store)))].join(", "))}`, s:r.s})),U,"Brand")}</div>`:""}
   ${ps.length>=2?`<div class="card"><h2 class="sec">Price over time</h2>${priceChart(ps,it)}</div>`:""}
-  ${all.length?`<div class="card"><h2 class="sec">Purchases</h2><div class="list">${all.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${fam.length>1?esc(disp(itemById(p.item)))+" · ":""}${esc(brandOf(p)||p.product||"")}${brandOf(p)||p.product?" · ":""}${esc(qtyText(p,itemById(p.item)||it))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span><span class="r">${p.unit_price_eur>0?esc(U(p.unit_price_eur)):"–"}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`).join("")}</div></div>`:""}
+  ${all.length?`<div class="card"><h2 class="sec">Prices</h2><div class="list">${all.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${fam.length>1?esc(disp(itemById(p.item)))+" · ":""}${esc(brandOf(p)||p.product||"")}${brandOf(p)||p.product?" · ":""}${esc(qtyText(p,itemById(p.item)||it))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span><span class="r">${p.unit_price_eur>0?esc(U(p.unit_price_eur)):"–"}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`).join("")}</div></div>`:""}
   <p><button class="btn small" data-go="itemedit/${encodeURIComponent(id)}">Edit item</button></p>`;
 }
 function renderBagItem(it){
@@ -1111,7 +1196,7 @@ function cheapestPerItem(){
     const meds=Object.entries(st).map(([s,v])=>[s,priceStats(v).median]).sort((a,b)=>a[1]-b[1]); out.push({it, store:meds[0][0], med:meds[0][1], saving:1-meds[0][1]/meds[meds.length-1][1]}); }
   return out.sort((a,b)=>b.saving-a.saving);
 }
-let PF={q:"", period:"all", from:"", to:"", cat:"", shop:""};
+let PF={q:"", period:"all", from:"", to:"", cat:"", shop:"", kind:"all"};
 function periodRange(p){ const t=new Date(), y=t.getFullYear(), m=t.getMonth(); const iso=d=>localISO(d);
   if(p==="month") return [iso(new Date(y,m,1)), iso(t)]; if(p==="3m") return [iso(new Date(y,m-2,1)), iso(t)];
   if(p==="year") return [`${y}-01-01`, iso(t)]; if(p==="lastyear") return [`${y-1}-01-01`, `${y-1}-12-31`];
@@ -1121,24 +1206,26 @@ function purchaseMatches(p){
   const it=itemById(p.item); const ty=it&&it.type?itemById(it.type):null;
   if(PF.cat && (it?it.cat:"")!==PF.cat) return false;
   if(PF.shop && p.store!==PF.shop) return false;
+  if(PF.kind==="bought" && !isBought(p)) return false; if(PF.kind==="noted" && isBought(p)) return false;
   if(PF.q){ const q=fold(PF.q); const hay=[it&&disp(it), it&&it.es, it&&it.zh, ty&&ty.es, ty&&ty.zh, p.product, brandOf(p), storeName(p.store), p.notes].filter(Boolean).map(fold).join(" | "); if(!hay.includes(q)) return false; }
   return true;
 }
 function purchasesListHTML(){
   const ps=S.purchases.filter(purchaseMatches).sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.id||"").localeCompare(a.id||""));
-  const clear = PF.q||PF.period!=="all"||PF.cat||PF.shop ? ` · <button class="linkbtn" data-act="pfclear">Clear filters</button>` : "";
+  const clear = PF.q||PF.period!=="all"||PF.cat||PF.shop||PF.kind!=="all" ? ` · <button class="linkbtn" data-act="pfclear">Clear filters</button>` : "";
   if(!ps.length) return `<p class="empty">No purchases match.${clear}</p>`;
-  const total=ps.reduce((a,p)=>a+(p.price_eur||0),0);
+  const total=ps.filter(isBought).reduce((a,p)=>a+(p.price_eur||0),0); const noted=ps.filter(p=>!isBought(p)).length;
   const byMonth={}; for(const p of ps){ const m=(p.date||"").slice(0,7); (byMonth[m]=byMonth[m]||[]).push(p); }
-  return `<p class="sub"><b>${ps.length}</b> purchase${ps.length===1?"":"s"} · <b>${esc(fmtMoney(total,"EUR"))}</b>${clear}</p>`+Object.entries(byMonth).map(([m,v])=>`<div class="card"><h2 class="sec">${esc(new Date(m+"-15T12:00:00").toLocaleDateString("en-GB",{month:"long",year:"numeric"}))} · ${esc(fmtMoney(v.reduce((a,p)=>a+(p.price_eur||0),0),"EUR"))}</h2><div class="list">${v.map(p=>purchaseLi(p).replace(`data-go="item/${encodeURIComponent(p.item)}"`,`data-go="edit/${encodeURIComponent(p.id)}"`)).join("")}</div></div>`).join("");
+  return `<p class="sub"><b>${ps.length}</b> price${ps.length===1?"":"s"} · <b>${esc(fmtMoney(total,"EUR"))}</b> spent${S.settings.spendFrom?` (counting from ${esc(niceDate(S.settings.spendFrom))})`:""}${noted?` · ${noted} noted only`:""}${clear}</p>`+Object.entries(byMonth).map(([m,v])=>`<div class="card"><h2 class="sec">${esc(new Date(m+"-15T12:00:00").toLocaleDateString("en-GB",{month:"long",year:"numeric"}))} · ${esc(fmtMoney(v.filter(isBought).reduce((a,p)=>a+(p.price_eur||0),0),"EUR"))}</h2><div class="list">${v.map(p=>purchaseLi(p).replace(`data-go="item/${encodeURIComponent(p.item)}"`,`data-go="edit/${encodeURIComponent(p.id)}"`)).join("")}</div></div>`).join("");
 }
 function renderPurchases(){
   setBar("");
   const shops=[...new Set(S.purchases.map(p=>p.store))].filter(storeById).sort((a,b)=>storeName(a).localeCompare(storeName(b)));
   const cats=[...new Set(S.purchases.map(p=>(itemById(p.item)||{}).cat).filter(Boolean))];
-  $("#app").innerHTML=`${topbar("All purchases","home")}
+  $("#app").innerHTML=`${topbar("All prices","home")}
   <div class="card filters">
    <input class="t" id="pf_q" type="search" placeholder="Search: item, brand, shop… (any language)" value="${esc(PF.q)}" autocomplete="off">
+   <div class="seg" role="group" aria-label="Show" style="margin-top:10px">${[["all","All"],["bought","Bought"],["noted","Noted only"]].map(([k,l])=>`<button data-act="pfkind" data-k="${k}" aria-pressed="${PF.kind===k}">${l}</button>`).join("")}</div>
    <div class="chips" role="group" aria-label="Period">${[["all","All"],["month","This month"],["3m","3 months"],["year","This year"],["lastyear","Last year"],["custom","Dates…"]].map(([k,l])=>`<button class="btn small" data-act="pfperiod" data-p="${k}" aria-pressed="${PF.period===k}">${l}</button>`).join("")}</div>
    ${PF.period==="custom"?`<div class="row2"><div><label class="f" for="pf_from">From</label><input class="t" id="pf_from" type="date" value="${esc(PF.from)}"></div><div><label class="f" for="pf_to">To</label><input class="t" id="pf_to" type="date" value="${esc(PF.to)}"></div></div>`:""}
    <div class="row2"><select class="t" id="pf_cat" aria-label="Category"><option value="">All categories</option>${S.cats.filter(c=>cats.includes(c.id)).map(c=>`<option value="${c.id}" ${PF.cat===c.id?"selected":""}>${esc(c.en)} · ${esc(c.zh)}</option>`).join("")}</select>
@@ -1186,8 +1273,7 @@ async function importFile(){
   if(!fresh.length){ toast(`All ${rows.length} rows are already in your data.`); return; }
   if(!confirm(`Add ${fresh.length} purchase${fresh.length===1?"":"s"}${rows.length>fresh.length?` (${rows.length-fresh.length} already there are skipped)`:""}?`)) return;
   const cols=LOG_HEADER.split(","); const lines=fresh.map(r=>csvLine(cols.map(c=>r[c]??"")));
-  try{ const text=await ghUpdate("purchases.csv", t=>appendLines(t,lines), `Import ${fresh.length} purchases from ${file.name}`); S.purchases=csvParse(text).map(numRow); saveCache(); toast(`${fresh.length} purchases imported`); location.hash="home"; }
-  catch(e){ toast(e.message); }
+  const res=await savePurchases(fresh, `Import ${fresh.length} purchases from ${file.name}`); toast(res.ok?`${fresh.length} purchases imported`:res.text); location.hash="home";
 }
 
 /* ===================== SETTINGS ===================== */
@@ -1203,6 +1289,9 @@ function renderSettings(first){
     <p><button class="btn primary block" data-act="savecfg">Connect and sync</button></p><p id="s_msg" class="err" role="alert"></p></div>
   ${!first?`<div class="card"><h2 class="sec">Names</h2><div class="row2"><div><label class="f" for="n1">Person 1</label><input class="t" id="n1" value="${esc(S.people.user1||"")}" maxlength="24"></div><div><label class="f" for="n2">Person 2</label><input class="t" id="n2" value="${esc(S.people.user2||"")}" maxlength="24"></div></div>
      <p><button class="btn block" data-act="savenames">Save names</button></p></div>
+   <div class="card"><h2 class="sec">Spending</h2><p class="sub">Prices dated before this date count as noted only, so spending starts here. Shared by both phones; nothing in your data changes, and you can move or clear it any time.</p>
+     <label class="f" for="sp_from">Count spending from</label><div style="display:flex;gap:8px"><input class="t" id="sp_from" type="date" value="${esc(S.settings.spendFrom||"")}" max="${localISO()}"><button class="btn small" data-act="spfromtoday">Today</button></div>
+     <div class="links"><button class="btn" data-act="savespfrom">Save</button>${S.settings.spendFrom?`<button class="btn" data-act="clearspfrom">Count everything</button>`:""}</div></div>
    <div class="card"><h2 class="sec">Import purchases from a file</h2><p class="sub">A CSV in the app's format, for example one prepared from an old log. Rows already in your data are skipped, so importing twice is safe.</p>
      <input id="imp_file" type="file" accept=".csv,text/csv"><p><button class="btn block" data-act="importfile">Import</button></p></div>
    <div class="card"><p class="sub"><button class="linkbtn" data-go="shops">Shops: names, kinds and countries</button></p></div>
@@ -1226,7 +1315,8 @@ document.addEventListener("click", async ev=>{
   if(a==="pickitem") return openPicker(id=>{ const keep=F.item===id; F.item=id; if(!keep){ const it=itemById(id); F.pack_unit=defaultUnit(it); F.pack_size=""; F.pack_count=1; F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat) ? "weight" : "pack"; } renderForm(F._kind, F.item); });
   if(a==="pick"){ const cb=pickCb; closeSheet(); if(cb) cb(t.dataset.id); return; }
   if(a==="pfperiod"){ PF.period=t.dataset.p; renderPurchases(); return; }
-  if(a==="pfclear"){ PF={q:"", period:"all", from:"", to:"", cat:"", shop:""}; renderPurchases(); return; }
+  if(a==="pfclear"){ PF={q:"", period:"all", from:"", to:"", cat:"", shop:"", kind:"all"}; renderPurchases(); return; }
+  if(a==="pfkind"){ PF.kind=t.dataset.k; renderPurchases(); return; }
   if(a==="itemcountry"){ itemCountry=t.dataset.c; itemCountryFor=t.dataset.id; renderItem(t.dataset.id); return; }
   if(a==="picktype"){ pickerTypeStep(t.dataset.id); return; }
   if(a==="addsub"){ const name=($("#pk_newsub").value||"").trim(); if(!name){ toast("Type the new type's name."); return; }
@@ -1245,11 +1335,12 @@ document.addEventListener("click", async ev=>{
   if(a==="newitemstandalone"){ pickCb=id=>{ location.hash="item/"+encodeURIComponent(id); }; return openNewItem(($("#h_q")&&$("#h_q").value)||($("#if_q")&&$("#if_q").value)||""); }
   if(a==="savenewitem"){ const it=itemFromForm(null); if(!it) return; try{ await upsertItem(it); toast("Item added"); const cb=pickCb; closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
   if(a==="saveitem"){ const base=itemById(t.dataset.id); const it=itemFromForm(base); if(!it) return; try{ await upsertItem(it); toast("Item saved"); location.hash="item/"+encodeURIComponent(it.id); }catch(e){ toast(e.message); } return; }
+  if(a==="bought"){ F.bought=t.dataset.v; document.querySelectorAll('[data-act="bought"]').forEach(b=>b.setAttribute("aria-pressed", b.dataset.v===F.bought)); return; }
   if(a==="mode"){ F.mode=t.dataset.v; renderForm(F._kind, F.item); return; }
   if(a==="clearform"){ F=blankForm(""); renderForm(F._kind||"log"); return; }
-  if(a==="checktolog"){ if(!F.item){ toast("Choose an item first."); return; } F._kind="log"; F._carry=true; location.hash="log/"+encodeURIComponent(F.item); return; }
+  if(a==="checktolog"){ if(!F.item){ toast("Choose an item first."); return; } F._kind="log"; F._carry=true; F.bought="0"; location.hash="log/"+encodeURIComponent(F.item); return; }
   if(a==="savepurchase") return savePurchaseForm();
-  if(a==="delpurchase"){ if(!confirm("Delete this purchase? It can only be undone from GitHub's history.")) return; const id=F.id, item=F.item; try{ await rewritePurchases(rows=>rows.filter(r=>r.id!==id), `Delete purchase ${id}`); toast("Purchase deleted"); F=null; location.hash="item/"+encodeURIComponent(item); }catch(e){ toast(e.message); } return; }
+  if(a==="delpurchase"){ if(!confirm("Delete this price? It can only be undone from GitHub's history.")) return; const id=F.id, item=F.item; try{ await rewritePurchases(rows=>rows.filter(r=>r.id!==id), `Delete purchase ${id}`); toast("Purchase deleted"); F=null; location.hash="item/"+encodeURIComponent(item); }catch(e){ toast(e.message); } return; }
   if(a==="checkitem"){ F=blankForm(t.dataset.id); F._kind="check"; F._carry=true; const it=itemById(t.dataset.id); F.pack_unit=defaultUnit(it); F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat)?"weight":"pack"; location.hash="check/"+encodeURIComponent(t.dataset.id); return; }
   if(a==="logitem"){ F=blankForm(t.dataset.id); F._kind="log"; F._carry=true; const it=itemById(t.dataset.id); F.pack_unit=defaultUnit(it); F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat)?"weight":"pack"; location.hash="log/"+encodeURIComponent(t.dataset.id); return; }
   if(a==="readreceipt") return readReceipt();
@@ -1258,6 +1349,9 @@ document.addEventListener("click", async ev=>{
   if(a==="pickline"){ const i=+t.dataset.i; return openPicker(id=>{ const l=RC.lines[i]; l.item=id; l.how="chosen"; const it=itemById(id); if(it.basis==="unit"){ l.count = l.size && !l.unit ? l.count : (l.count||""); } renderReceipt(); }, RC.lines[i].name.split(" ")[0]); }
   if(a==="savecfg") return connect();
   if(a==="importfile") return importFile();
+  if(a==="spfromtoday"){ $("#sp_from").value=localISO(); return; }
+  if(a==="savespfrom"||a==="clearspfrom"){ const v=a==="clearspfrom"?"":$("#sp_from").value; const next={...S.settings, spendFrom:v||undefined}; if(!v) delete next.spendFrom;
+    try{ await saveJson("settings.json", next, v?`Count spending from ${v}`:"Count all spending"); S.settings=next; saveCache(); toast(v?`Spending counts from ${niceDate(v)}`:"All bought prices count as spending"); renderSettings(false); }catch(e){ toast(e.message); } return; }
   if(a==="saveshop") return saveShop(t.dataset.id);
   if(a==="newshopfromlist"){ return openStorePicker(id=>{ location.hash="shopedit/"+encodeURIComponent(id); }); }
   if(a==="syncnow"){ toast("Syncing…"); await sync(); toast(S.error||"Synced"); render(); return; }
@@ -1304,7 +1398,7 @@ document.addEventListener("change", async ev=>{
 });
 
 /* ===================== START ===================== */
-loadCache(); render(); if(cfg.token) sync().then(render);
+loadCache().then(()=>{ render(); if(cfg.token) sync().then(render); });
 
 </script>
 </body>
