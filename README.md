@@ -12,6 +12,14 @@ App link (after GitHub Pages is on): https://pinghsuanlin.github.io/grocery-trac
 4. **Give your token access.** GitHub → profile picture → Settings → Developer settings → Fine-grained tokens → open each phone's token → Edit → Repository access: add `grocery-log` (keep `gym-log`) → Save. Permissions stay Contents: Read and write.
 5. **On each phone:** open the app link in Safari, paste the same token you use for the gym app, choose who uses the phone, tap Connect and sync, then Share → Add to Home Screen.
 
+## Finding your way
+
+- **Tabs at the bottom:** Home · Items · Prices · Shops.
+- **Home:** search for an item, or tap **Add a price** / **Add a receipt**.
+- **Add a price:** enter the item, shop and price and the verdict appears straight away. Then **Save as bought**, **Save as noted**, or just go back without saving.
+- **Item pages:** best price, by shop, by brand, price over time (tap a dot for its price), then all prices. Type pages (e.g. Milk) show each type separately and never mix them.
+- **Shops:** which shop is cheapest on top, your shops below (tap one to edit).
+
 ## Using it
 
 - **Fair comparisons:** verdicts use the last 12 months of prices when there are at least 3, so inflation doesn't make today's prices look expensive. Each shop has a country (Spain unless you choose otherwise when adding it); prices are only compared within the same country, and item pages have a switch when an item was bought in more than one.

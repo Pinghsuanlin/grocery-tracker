@@ -117,6 +117,16 @@ table.t2 td.n{text-align:right;font-family:var(--price);font-stretch:85%;font-we
 .warntext{color:var(--expensive)}
 .filters .chips{margin:10px 0 8px} .filters .row2{margin-top:6px}
 [data-act="pfperiod"][aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);box-shadow:none}
+#tabhost .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;justify-content:space-around;background:var(--surface);border-top:1px solid var(--line);padding:4px 4px calc(4px + env(safe-area-inset-bottom,0px))}
+#tabhost .tabbar button{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;border:0;background:none;color:var(--muted);font-size:12px;font-weight:600;min-height:52px;padding:4px 0}
+#tabhost .tabbar svg{width:24px;height:24px}
+#tabhost .tabbar button[aria-current="page"]{color:var(--accent)}
+body.hastabs #app{padding-bottom:calc(96px + env(safe-area-inset-bottom,0px))}
+.tipbox{position:absolute;z-index:60;background:var(--ink);color:var(--bg);font-size:14px;font-weight:600;padding:6px 10px;border-radius:8px;max-width:260px;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25)}
+.hint{font-size:14px;color:var(--muted);margin:4px 2px 10px}
+.cta2 .btn{min-height:56px;font-size:17px}
+details.card.more summary{font-weight:700}
+details.more summary::after{content:"▾";margin-left:auto;padding-left:8px;color:var(--muted)} details.more[open] summary::after{content:"▴"}
 .linkbtn{border:0;background:none;color:var(--accent);font-weight:600;padding:0;font-size:inherit;text-decoration:underline;text-underline-offset:2px;min-height:28px;text-align:left}
 .checkrow{display:flex;gap:8px;align-items:center;min-height:46px;font-size:15px}
 .checkrow input{width:22px;height:22px}
@@ -708,20 +718,26 @@ function priceTagHTML(c, _unused, opts={}){
   </div>`;
 }
 /* ===================== ROUTER ===================== */
+const TABS=[["home","Home","M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"],["items","Items","M4 6h16M4 12h16M4 18h10"],["purchases","Prices","M7 4h10l3 4v12H4V8zM8 12h8M8 16h5"],["shops","Shops","M4 9l1.5-5h13L20 9M4 9h16v11H4zM9 20v-6h6v6"]];
+function setTabs(active){
+  let host=document.getElementById("tabhost"); if(!host){ host=document.createElement("nav"); host.id="tabhost"; host.setAttribute("aria-label","Main"); document.body.appendChild(host); }
+  document.body.classList.toggle("hastabs", !!active);
+  host.innerHTML = active ? `<div class="tabbar">${TABS.map(([v,l,d])=>`<button data-go="${v}" aria-current="${v===active?"page":"false"}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg><span>${l}</span></button>`).join("")}</div>` : "";
+}
 function render(){
   const h=location.hash.replace(/^#/,"")||"home"; const parts=h.split("/"); const view=parts[0]; const arg=parts[1]!==undefined?decodeURIComponent(parts[1]):undefined;
-  if(!cfg.token && view!=="settings") return renderSettings(true);
-  closeSheet();
+  if(!cfg.token && view!=="settings"){ setTabs(null); return renderSettings(true); }
+  closeSheet(); hideTip();
   if(view!=="item") itemCountryFor=null;   /* a manual country switch lasts while you stay on that item */
-  if(view==="check") return renderForm("check", arg);
-  if(view==="log") return renderForm("log", arg);
+  const tab = view==="stores"?"shops" : ["home","items","purchases","shops"].includes(view)||!view ? (view||"home") : (["edit","add","check","log","receipt","item","itemedit","shopedit","settings"].includes(view)?null:"home");
+  setTabs(tab);
+  if(view==="check"||view==="log"||view==="add") return renderForm("add", arg);
   if(view==="edit") return renderForm("edit", arg);
   if(view==="receipt") return renderReceipt();
   if(view==="item") return renderItem(arg);
   if(view==="items") return renderItems(arg);
   if(view==="itemedit") return renderItemEdit(arg);
-  if(view==="stores") return renderStores();
-  if(view==="shops") return renderShops();
+  if(view==="stores"||view==="shops") return renderShops();
   if(view==="shopedit") return renderShopEdit(arg);
   if(view==="purchases") return renderPurchases();
   if(view==="settings") return renderSettings(false);
@@ -732,27 +748,42 @@ function topbar(title, back){ return `<header class="top">${back?`<button class=
 function personSwitch(){ return `<div class="userswitch" role="group" aria-label="Who is logging">${Object.keys(DEFAULT_PEOPLE).map(k=>`<button data-person="${k}" aria-pressed="${cfg.person===k}">${esc(S.people[k]||DEFAULT_PEOPLE[k])}</button>`).join("")}</div>`; }
 function tokenBanner(){
   const steps="On GitHub: profile picture → Settings → Developer settings → Fine-grained tokens → open the token → Regenerate. Then paste it in Settings.";
-  if(!cfg.tokenExpires) return `<div class="banner"><b>When does your token expire?</b><p>Add the date in Settings so the app can remind you before saving stops working.</p><button class="btn small" data-go="settings">Open Settings</button></div>`;
+  if(!cfg.tokenExpires) return LS.get("gr_tokenhint_off",false) ? "" : `<p class="hint">Tip: add your token's expiry date in <button class="linkbtn" data-go="settings">Settings</button> for a reminder before it runs out. <button class="linkbtn" data-act="tokenhintoff">Dismiss</button></p>`;
   const days=Math.round((new Date(cfg.tokenExpires+"T12:00:00")-new Date(localISO()+"T12:00:00"))/864e5);
   if(days<0) return `<div class="banner"><b>Your GitHub token expired on ${esc(niceDate(cfg.tokenExpires))}</b><p>Saving won't work until you renew it. ${esc(steps)}</p><button class="btn small primary" data-go="settings">Open Settings</button></div>`;
   if(days<=14) return `<div class="banner"><b>Your GitHub token expires in ${days} day${days===1?"":"s"}</b><p>${esc(steps)}</p><button class="btn small" data-go="settings">Open Settings</button></div>`;
   return "";
 }
 
+/* ===================== TOOLTIPS: tap a point or bar to see its value ===================== */
+function hideTip(){ const t=document.getElementById("tipbox"); if(t) t.remove(); }
+function showTip(el, ev){
+  hideTip(); const tip=document.createElement("div"); tip.id="tipbox"; tip.className="tipbox"; tip.setAttribute("role","status"); tip.textContent=el.getAttribute("data-tip"); document.body.appendChild(tip);
+  const r=el.getBoundingClientRect(); const cx=(ev&&ev.clientX)||r.left+r.width/2, cy=(ev&&ev.clientY)||r.top;
+  const w=tip.offsetWidth, h=tip.offsetHeight; let x=Math.min(Math.max(8,cx-w/2), innerWidth-w-8), y=cy-h-14; if(y<8) y=cy+18;
+  tip.style.left=x+"px"; tip.style.top=(y+scrollY)+"px";
+}
+document.addEventListener("click", ev=>{ const el=ev.target.closest && ev.target.closest("[data-tip]"); if(el){ showTip(el, ev); ev.stopPropagation(); } else hideTip(); }, true);
+/* round, evenly spaced values for grid lines */
+function niceTicks(lo, hi, n){
+  if(!(hi>lo)) hi=lo+1; const raw=(hi-lo)/(n||4), mag=Math.pow(10,Math.floor(Math.log10(raw))), f=raw/mag;
+  const step=(f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10)*mag; const a=Math.floor(lo/step)*step, b=Math.ceil(hi/step)*step; const out=[];
+  for(let v=a; v<=b+step*1e-6; v+=step) out.push(Math.round(v*1e6)/1e6); return out;
+}
+
 /* ===================== HOME ===================== */
 function renderHome(){
   setBar("");
   const q=queue().length;
-  const recent=S.purchases.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.id||"").localeCompare(a.id||"")).slice(0,8);
+  const recent=S.purchases.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.id||"").localeCompare(a.id||"")).slice(0,5);
   $("#app").innerHTML=`${topbar("Groceries")}
   ${personSwitch()}
   <p class="status ${S.error?"bad":""}">${S.error?esc(S.error):S.synced?`Synced ${esc(niceDate(S.synced.slice(0,10)))}`:"Not synced yet"}${q?` · ${q} waiting to upload`:""}</p>
   ${tokenBanner()}
-  <button class="pricetag cta" data-go="check"><span class="what">At the shelf</span><div class="big">Is this a good price?</div><div class="note">Type the price and size to compare it with what you've paid before.</div></button>
-  <div class="links"><button class="btn primary" data-go="log">Log a price</button><button class="btn" data-go="receipt">Add from a receipt</button></div>
-  <div class="card"><label class="f" for="h_q" style="margin-top:0">Find an item</label><input class="t" id="h_q" type="search" placeholder="Leche, milk, 牛奶…" autocomplete="off"><div id="h_res" class="list"></div></div>
-  <div class="card"><h2 class="sec">Recent prices</h2>${recent.length?`<div class="list">${recent.map(purchaseLi).join("")}</div><p><button class="btn small" data-go="purchases">All prices</button></p>`:`<p class="empty">Nothing logged yet. Log a price or add a receipt to start.</p>`}</div>
-  <div class="links"><button class="btn" data-go="stores">Compare shops</button><button class="btn" data-go="items">All items</button><button class="btn" data-go="shops">Shops</button></div>`;
+  <div class="card"><label class="f" for="h_q" style="margin-top:0">What's a good price for…</label><input class="t" id="h_q" type="search" placeholder="Leche, milk, 牛奶…" autocomplete="off"><div id="h_res" class="list"></div></div>
+  <div class="links cta2 cta"><button class="btn primary" data-go="add">Add a price</button><button class="btn" data-go="receipt">Add a receipt</button></div>
+  <p class="sub" style="margin:4px 2px 12px">Add a price shows straight away whether it's a good one; then save it as bought, as a note, or not at all.</p>
+  <div class="card"><h2 class="sec">Recent prices</h2>${recent.length?`<div class="list">${recent.map(purchaseLi).join("")}</div><p><button class="btn small" data-go="purchases">See all prices</button></p>`:`<p class="empty">Nothing yet. Add a price or a receipt to start.</p>`}</div>`;
 }
 function purchaseLi(p){
   const it=itemById(p.item); const b=brandOf(p);
@@ -776,23 +807,23 @@ function brandList(itemId){ const fam=new Set([itemId]); const it=itemById(itemI
   return [...S.purchases.filter(p=>fam.has(p.item)).map(brandOf), ...OWN_LABELS].filter(b=>b&&!seen.has(b)&&seen.add(b)); }
 function renderForm(kind, arg){
   if(kind==="edit"){ const p=S.purchases.find(x=>x.id===arg); if(!p){ location.hash="home"; return; } if(!F||F.id!==p.id) F=formFromPurchase(p); }
-  else if(!F || F._kind!==kind || (arg && F.item!==arg && !F._carry)){ F=blankForm(arg); }
+  else if(!F || F._kind!==kind || F.id || (arg && F.item!==arg && !F._carry)){ F=blankForm(arg); }
   F._kind=kind; F._carry=false;
   const it=itemById(F.item);
   if(it && !F.pack_unit) F.pack_unit=defaultUnit(it);
-  const title = kind==="check"?"Check a price":kind==="edit"?"Edit price":"Log a price";
+  const title = kind==="edit"?"Edit price":"Add a price";
   const unitOpts = it&&it.basis==="unit" ? [["unit",unitWord(it)+"s"]] : it&&it.basis==="L" ? [["ml","ml"],["cl","cl"],["L","L"]] : [["g","g"],["kg","kg"]];
   const own = F.own==="1" || (F.own===""&&F.brand&&isOwnLabel(F.brand));
   $("#app").innerHTML=`${topbar(title, kind==="edit"?"item/"+encodeURIComponent(F.item):"home")}
   <div class="card">
-    ${kind!=="check"?`<div class="seg" role="group" aria-label="Bought or noted" style="margin-bottom:10px"><button data-act="bought" data-v="1" aria-pressed="${F.bought!=="0"}">Bought it</button><button data-act="bought" data-v="0" aria-pressed="${F.bought==="0"}">Just noting the price</button></div>`:""}
+    ${kind==="edit"?`<div class="seg" role="group" aria-label="Bought or noted" style="margin-bottom:10px"><button data-act="bought" data-v="1" aria-pressed="${F.bought!=="0"}">Bought it</button><button data-act="bought" data-v="0" aria-pressed="${F.bought==="0"}">Just noting the price</button></div>`:""}
     <label class="f" style="margin-top:0">Item</label>
     <button class="pickbtn ${it?"set":""}" data-act="pickitem">${it?`${esc(disp(it))} <span class="zh">${esc(it.zh)} · ${esc(it.es)}</span>`:"Choose or add an item…"}</button>
-    <label class="f">Shop${kind==="check"?` <span class="sub">(optional)</span>`:""}</label>${storeBtn(F.store,"pickstore")}
-    ${kind!=="check"?`<label class="f" for="f_date">Date</label><input class="t" id="f_date" type="date" data-f="date" value="${esc(F.date)}" max="${localISO()}">`:""}
+    <label class="f">Shop <span class="sub">(needed to save)</span></label>${storeBtn(F.store,"pickstore")}
+    <label class="f" for="f_date">Date</label><input class="t" id="f_date" type="date" data-f="date" value="${esc(F.date)}" max="${localISO()}">
     ${it&&!it.nocompare?`<div class="row2"><div><label class="f" for="f_brand">Brand <span class="sub">(optional)</span></label><input class="t" id="f_brand" data-f="brand" list="brandlist" value="${esc(F.brand)}" placeholder="e.g. Hacendado" autocomplete="off"><datalist id="brandlist">${brandList(F.item).map(b=>`<option value="${esc(b)}">`).join("")}</datalist></div>
       <div><label class="f">&nbsp;</label><label class="checkrow"><input type="checkbox" id="f_own" ${own?"checked":""}> Own label (marca blanca)</label></div></div>`:""}
-    ${kind!=="check"&&it&&!it.nocompare?`<label class="f" for="f_product">Product name <span class="sub">(optional)</span></label><input class="t" id="f_product" data-f="product" value="${esc(F.product)}" placeholder="as on the label or receipt">`:""}
+    ${it&&!it.nocompare?`<label class="f" for="f_product">Product name <span class="sub">(optional)</span></label><input class="t" id="f_product" data-f="product" value="${esc(F.product)}" placeholder="as on the label or receipt">`:""}
   </div>
   ${it&&it.nocompare?`<div class="card">
     <div class="row2"><div><label class="f" for="f_price" style="margin-top:0">You paid</label><input class="t" id="f_price" data-f="price_pack" inputmode="decimal" value="${esc(F.price_pack)}" placeholder="4,99"></div>
@@ -818,13 +849,12 @@ function renderForm(kind, arg){
       ${F.currency!=="EUR"?`<div><label class="f" for="f_rate" style="margin-top:0">1 € = ? ${esc(F.currency)}</label><input class="t" id="f_rate" data-f="rate" inputmode="decimal" value="${esc(F.rate||"")}" placeholder="looking up…"></div>`:"<span></span>"}</div>
     ${F.currency!=="EUR"?`<p class="sub small">Converted at the reference rate for the purchase date. Edit it if your card used a different rate.</p>`:""}</div>`:""}
   <div id="f_result"></div>
-  ${kind!=="check"&&it?`<div class="card"><label class="f" for="f_notes" style="margin-top:0">Notes</label><input class="t" id="f_notes" data-f="notes" value="${esc(F.notes)}">
+  ${it?`<div class="card"><label class="f" for="f_notes" style="margin-top:0">Notes</label><input class="t" id="f_notes" data-f="notes" value="${esc(F.notes)}">
     <label class="f" for="f_photo">Photo <span class="sub">(optional: label or receipt)</span></label><input id="f_photo" type="file" accept="image/*" capture="environment">${F.photo?`<p class="sub small">Saved photo: ${esc(F.photo)}</p>`:""}</div>`:""}`;
   updateResult();
   if(F.currency!=="EUR" && !(F.rate>0)) lookupRate();
-  setBar(kind==="check" ? `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="checktolog">Log this price</button>`
-       : kind==="edit" ? `<button class="btn danger" data-act="delpurchase">Delete</button><button class="btn primary" data-act="savepurchase">Save changes</button>`
-       : `<button class="btn" data-act="clearform">Clear</button><button class="btn primary" data-act="savepurchase">Save price</button>`);
+  setBar(kind==="edit" ? `<button class="btn danger" data-act="delpurchase">Delete</button><button class="btn primary" data-act="savepurchase">Save changes</button>`
+       : `<button class="btn" data-act="savepurchase" data-bought="0">Save as noted</button><button class="btn primary" data-act="savepurchase" data-bought="1">Save as bought</button>`);
 }
 function formFields(){ const f={...F}; for(const k of ["pack_count","pack_size","packs","price_pack","pct","weight","per_kg","total","rate","value"]) f[k]=parseNum(F[k]); return f; }
 function updateResult(){
@@ -1088,37 +1118,50 @@ let itemCountry="ES", itemCountryFor=null;
 function renderItem(id){
   const it=itemById(id); if(!it){ location.hash="items"; return; }
   if(it.nocompare) return renderBagItem(it);
-  setBar(`<button class="btn" data-act="checkitem" data-id="${esc(id)}">Check a price</button><button class="btn primary" data-act="logitem" data-id="${esc(id)}">Log a price</button>`);
+  setBar(`<button class="btn primary" data-act="logitem" data-id="${esc(id)}">Add a price</button>`);
   const fam = isType(it) ? familyIds(it.id, S.items) : [it.id];
   const famPs=S.purchases.filter(p=>fam.includes(p.item));
   const ctys=[...new Set(famPs.map(p=>storeCountry(p.store)))];
   if(itemCountryFor!==id || !ctys.includes(itemCountry)){   /* open on the country of the latest purchase, unless you switched it here */
     const latest=famPs.slice().sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.id||"").localeCompare(b.id||"")).pop();
     itemCountry = latest ? storeCountry(latest.store) : HOME; }
-  const all=S.purchases.filter(p=>fam.includes(p.item) && storeCountry(p.store)===itemCountry);
+  const all=famPs.filter(p=>storeCountry(p.store)===itemCountry);
   const ps=all.filter(comparable).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  const s=priceStats(ps.map(p=>p.unit_price_eur)); const best=ps.slice().sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0]; const last=ps[ps.length-1];
   const U=x=>fmtUnitPrice(x,it.basis,unitWord(it)); const parent=it.type?itemById(it.type):null;
-  const subs = isType(it) ? byKey(ps, p=>p.item) : [];
-  const brands = byKey(ps, p=>brandOf(p)||"—");
+  const ctySwitch = ctys.length>1 ? `<div class="seg" role="group" aria-label="Country" style="margin:8px 0">${ctys.map(c=>`<button data-act="itemcountry" data-c="${c}" data-id="${esc(id)}" aria-pressed="${c===itemCountry}">${esc(countryName(c))}</button>`).join("")}</div>` : "";
+  const priceList = all.length?`<div class="card"><h2 class="sec">Prices</h2><div class="list">${all.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${fam.length>1?esc(disp(itemById(p.item)))+" · ":""}${esc(brandOf(p)||p.product||"")}${brandOf(p)||p.product?" · ":""}${esc(qtyText(p,itemById(p.item)||it))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}${isBought(p)?"":` · <span class="tagpill">noted</span>`}</span></span><span class="r">${p.unit_price_eur>0?esc(U(p.unit_price_eur)):"–"}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`).join("")}</div></div>`:"";
+  const head=`${topbar(disp(it),"home")}${ctySwitch}<p class="sub">${esc(it.es)} · ${esc(it.zh)} · compared per ${esc(unitWord(it))}${parent?` · <button class="linkbtn" data-go="item/${encodeURIComponent(parent.id)}">All ${esc(parent.en.toLowerCase())}</button>`:""}</p>`;
+  if(isType(it) && fam.length>1){
+    /* a type page: one summary per subtype, never mixed (dried and fresh pasta aren't comparable) */
+    const rows=byKey(ps, p=>p.item).sort((a,b)=>b.s.n-a.s.n);
+    $("#app").innerHTML=`${head}
+    ${rows.length?`<div class="card"><h2 class="sec">By type</h2><p class="sub">Each type is compared only with itself. Tap one for its best price, shops and brands.</p>
+      <table class="t2"><tr><th>Type</th><th style="text-align:right">Best</th><th style="text-align:right">Typical</th></tr>${rows.map(r=>{ const x=itemById(r.k); const best=r.v.slice().sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0];
+        return `<tr><td><button class="linkbtn" data-go="item/${encodeURIComponent(r.k)}">${esc(x.id===it.id?"Not specified":(x.sub?x.sub.en:x.en))}</button><br><span class="sub small">${r.s.n}× · best at ${esc(storeName(best.store))}</span></td><td class="n">${esc(U(r.s.best))}</td><td class="n">${esc(U(r.s.median))}</td></tr>`; }).join("")}</table></div>`
+     :`<p class="empty">No prices yet. Add one, or pick a type below.</p>`}
+    ${ps.length>=2?`<div class="card"><h2 class="sec">Price over time, by type</h2>${priceChart(ps,it,"item")}</div>`:""}
+    ${priceList}
+    <p><button class="btn small" data-go="itemedit/${encodeURIComponent(id)}">Edit item</button></p>`;
+    return;
+  }
+  const s=priceStats(ps.map(p=>p.unit_price_eur)); const best=ps.slice().sort((a,b)=>a.unit_price_eur-b.unit_price_eur)[0]; const last=ps[ps.length-1];
+  const brands = byKey(ps, p=>brandOf(p)||"Brand not recorded");
   const own=ps.filter(ownOf), named=ps.filter(p=>!ownOf(p)&&brandOf(p));
   const ownLine = own.length && named.length ? (()=>{ const a=priceStats(own.map(p=>p.unit_price_eur)).median, b=priceStats(named.map(p=>p.unit_price_eur)).median, d=Math.round((1-a/b)*100);
-    return `<p class="sub">${d>0?`Own label is about <b>${d}% cheaper</b> than branded`:d<0?`Own label is about ${-d}% pricier than branded`:"Own label and branded cost about the same"} here (typical ${esc(U(a))} vs ${esc(U(b))}).</p>`; })() : "";
-  const ctySwitch = ctys.length>1 ? `<div class="seg" role="group" aria-label="Country" style="margin:8px 0">${ctys.map(c=>`<button data-act="itemcountry" data-c="${c}" data-id="${esc(id)}" aria-pressed="${c===itemCountry}">${esc(countryName(c))}</button>`).join("")}</div>` : "";
-  $("#app").innerHTML=`${topbar(disp(it),"home")}${ctySwitch}<p class="sub">${esc(it.es)} · ${esc(it.zh)} · compared per ${esc(unitWord(it))}${parent?` · <button class="linkbtn" data-go="item/${encodeURIComponent(parent.id)}">All ${esc(parent.en.toLowerCase())}</button>`:""}</p>
-  ${best?`<div class="pricetag"><span class="sticker k-great">Best price</span><div class="what">${esc(storeName(best.store))} · ${esc(niceDate(best.date))}${fam.length>1&&best.item!==it.id?` · ${esc(disp(itemById(best.item)))}`:""}${brandOf(best)?` · ${esc(brandOf(best))}`:""}</div><div class="big">${esc(U(best.unit_price_eur))}</div>
-    <div class="note">Typical ${esc(U(s.median))} · last ${esc(U(last.unit_price_eur))} at ${esc(storeName(last.store))} · ${s.n} purchase${s.n===1?"":"s"}</div></div>`
-   :`<p class="empty">No prices yet. Log a price or check one at the shelf.</p>`}
-  ${subs.length?`<div class="card"><h2 class="sec">By type</h2>${groupTable(subs.map(r=>{ const x=itemById(r.k); return {name:`<button class="linkbtn" data-go="item/${encodeURIComponent(r.k)}">${esc(x.id===it.id?"Not specified":(x.sub?x.sub.en:x.en))}</button>`, extra:`${r.s.n}× · last ${esc(niceDate(r.last.date))}`, s:r.s}; }),U,"Type")}</div>`:""}
-  ${s.n>=2 && !isType(it)?`<div class="card"><h2 class="sec">What counts as a good price</h2><table class="t2">
+    return `<p class="sub">${d>0?`Own label is about <b>${d}% cheaper</b> than branded`:d<0?`Own label is about ${-d}% pricier than branded`:"Own label and branded cost about the same"} (typical ${esc(U(a))} vs ${esc(U(b))}).</p>`; })() : "";
+  $("#app").innerHTML=`${head}
+  ${best?`<div class="pricetag"><span class="sticker k-great">Best price</span><div class="what">${esc(storeName(best.store))} · ${esc(niceDate(best.date))}${brandOf(best)?` · ${esc(brandOf(best))}`:""}</div><div class="big">${esc(U(best.unit_price_eur))}</div>
+    <div class="note">Typical ${esc(U(s.median))} · last ${esc(U(last.unit_price_eur))} at ${esc(storeName(last.store))} · ${s.n} price${s.n===1?"":"s"}</div></div>`
+   :`<p class="empty">No prices yet. Add one to start comparing.</p>`}
+  ${ps.length?`<div class="card"><h2 class="sec">By shop</h2>${groupTable(byKey(ps,p=>p.store).map(r=>({name:esc(storeName(r.k)), extra:`last ${esc(niceDate(r.last.date))} · ${r.s.n}×`, s:r.s})),U,"Shop")}</div>`:""}
+  ${brands.length>1||(brands[0]&&brands[0].k!=="Brand not recorded")?`<div class="card"><h2 class="sec">By brand</h2>${ownLine}${groupTable(brands.map(r=>({name:`${esc(r.k)}${r.v.some(ownOf)?` <span class="tagpill">own label</span>`:""}`, extra:`${r.s.n}× · ${esc([...new Set(r.v.map(p=>storeName(p.store)))].join(", "))}`, s:r.s})),U,"Brand")}</div>`:""}
+  ${ps.length>=2?`<div class="card"><h2 class="sec">Price over time</h2>${priceChart(ps,it)}</div>`:""}
+  ${priceList}
+  ${s.n>=2?`<details class="card more"><summary>What counts as a good price</summary><table class="t2">
      <tr><td><span class="dot k-great"></span>Great deal</td><td class="n">≤ ${esc(U(s.best*1.05))}</td></tr>
      ${s.n>=4?`<tr><td><span class="dot k-good"></span>Good</td><td class="n">≤ ${esc(U(s.p25))}</td></tr><tr><td><span class="dot k-typical"></span>Typical</td><td class="n">≤ ${esc(U(s.p75))}</td></tr><tr><td><span class="dot k-expensive"></span>Expensive</td><td class="n">&gt; ${esc(U(s.p75))}</td></tr>`
        :`<tr><td><span class="dot k-good"></span>Good</td><td class="n">≤ ${esc(U(s.median))}</td></tr><tr><td><span class="dot k-expensive"></span>Expensive</td><td class="n">&gt; ${esc(U(s.median*1.15))}</td></tr>`}
-   </table><p class="sub small">Based on your ${s.n} purchases. It sharpens as you log more.</p></div>`:""}
-  ${ps.length?`<div class="card"><h2 class="sec">By shop</h2>${groupTable(byKey(ps,p=>p.store).map(r=>({name:esc(storeName(r.k)), extra:`last ${esc(niceDate(r.last.date))} · ${r.s.n}×`, s:r.s})),U,"Shop")}</div>`:""}
-  ${brands.length>1||(brands[0]&&brands[0].k!=="—")?`<div class="card"><h2 class="sec">By brand</h2>${ownLine}${groupTable(brands.map(r=>({name:`${esc(r.k)}${r.v.some(ownOf)?` <span class="tagpill">own label</span>`:""}`, extra:`${r.s.n}× · ${esc([...new Set(r.v.map(p=>storeName(p.store)))].join(", "))}`, s:r.s})),U,"Brand")}</div>`:""}
-  ${ps.length>=2?`<div class="card"><h2 class="sec">Price over time</h2>${priceChart(ps,it)}</div>`:""}
-  ${all.length?`<div class="card"><h2 class="sec">Prices</h2><div class="list">${all.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(p=>`<button class="li" data-go="edit/${encodeURIComponent(p.id)}"><span><b>${esc(storeName(p.store))}</b> <span class="sub">${esc(niceDate(p.date))}</span><br><span class="sub">${fam.length>1?esc(disp(itemById(p.item)))+" · ":""}${esc(brandOf(p)||p.product||"")}${brandOf(p)||p.product?" · ":""}${esc(qtyText(p,itemById(p.item)||it))}${p.promo?` · <span class="tagpill">${esc(p.promo)}</span>`:""}</span></span><span class="r">${p.unit_price_eur>0?esc(U(p.unit_price_eur)):"–"}<small>${esc(fmtMoney(p.price_paid,p.currency||"EUR"))}</small></span></button>`).join("")}</div></div>`:""}
+   </table><p class="sub small">Based on your ${s.n} prices; it sharpens as you add more.</p></details>`:""}
   <p><button class="btn small" data-go="itemedit/${encodeURIComponent(id)}">Edit item</button></p>`;
 }
 function renderBagItem(it){
@@ -1136,20 +1179,26 @@ function qtyText(p,it){
   if(it.basis==="unit") return `${n}${p.pack_count||1} ${unitWord(it)}${(p.pack_count||1)>1?"s":""}`;
   return `${n}${(p.pack_count||1)>1?(p.pack_count+" × "):""}${String(p.pack_size||"").replace(".",",")} ${p.pack_unit||""}`;
 }
-function priceChart(ps,it){
-  const W=600,H=200,P=30,L=70; const t=d=>new Date(d+"T12:00:00").getTime();
+function priceChart(ps, it, by){
+  by=by||"store";
+  const W=600,H=250,P=30,L=72; const t=d=>new Date(d+"T12:00:00").getTime();
   let t0=Math.min(...ps.map(p=>t(p.date))), t1=Math.max(...ps.map(p=>t(p.date))); if(t1===t0){ t0-=864e5*7; t1+=864e5*7; }
-  let lo=Math.min(...ps.map(p=>p.unit_price_eur)), hi=Math.max(...ps.map(p=>p.unit_price_eur)); if(hi===lo){ hi*=1.1; lo*=0.9; }
+  let lo=Math.min(...ps.map(p=>p.unit_price_eur)), hi=Math.max(...ps.map(p=>p.unit_price_eur));
+  const span=Math.max(hi-lo, hi*0.2||0.1); if(hi-lo<span){ const mid=(hi+lo)/2; lo=Math.max(0,mid-span/2); hi=lo+span; }
+  const ticks=niceTicks(lo,hi,4); lo=ticks[0]; hi=ticks[ticks.length-1];
   const x=d=>L+(W-L-P)*(t(d)-t0)/(t1-t0), y=v=>H-P-(H-2*P)*(v-lo)/(hi-lo);
-  const stores=[...new Set(ps.map(p=>p.store))]; const col=st=>STORE_COLORS[stores.indexOf(st)%STORE_COLORS.length];
-  const U=v=>fmtUnitPrice(v,it.basis,unitWord(it));
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Unit price over time by shop"><line x1="${L}" y1="${H-P}" x2="${W-P}" y2="${H-P}" stroke="var(--line)"/>
-   <text x="${L-8}" y="${y(hi)+5}" font-size="13" fill="var(--muted)" text-anchor="end">${esc(U(hi).replace(/ €\/.*/,"€"))}</text><text x="${L-8}" y="${y(lo)+5}" font-size="13" fill="var(--muted)" text-anchor="end">${esc(U(lo).replace(/ €\/.*/,"€"))}</text>
-   <text x="${L}" y="${H-P+18}" font-size="13" fill="var(--muted)">${esc(niceDate(new Date(t0).toISOString().slice(0,10)))}</text><text x="${W-P}" y="${H-P+18}" font-size="13" fill="var(--muted)" text-anchor="end">${esc(niceDate(new Date(t1).toISOString().slice(0,10)))}</text>
-   ${ps.map(p=>`<circle cx="${x(p.date).toFixed(1)}" cy="${y(p.unit_price_eur).toFixed(1)}" r="6" fill="${col(p.store)}"><title>${esc(storeName(p.store))} ${esc(niceDate(p.date))}: ${esc(U(p.unit_price_eur))}</title></circle>`).join("")}</svg>
-   <div class="legend">${stores.map(st=>`<span><i style="background:${col(st)}"></i>${esc(storeName(st))}</span>`).join("")}</div>`;
+  const key=p=>by==="item"?p.item:p.store; const name=k=>by==="item"?(()=>{ const x=itemById(k); return x&&x.sub?x.sub.en:x&&x.kind==="type"?"Not specified":disp(x); })():storeName(k);
+  const groups=[...new Set(ps.map(key))]; const col=k=>STORE_COLORS[groups.indexOf(k)%STORE_COLORS.length];
+  const U=v=>fmtUnitPrice(v,it.basis,unitWord(it)); const short=v=>U(v).replace(/ €\/.*/," €");
+  const grid=ticks.map((v,i)=>`<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-P}" y2="${y(v).toFixed(1)}" stroke="var(--line)" ${i?'stroke-dasharray="3 4"':""}/><text x="${L-8}" y="${(y(v)+4).toFixed(1)}" font-size="12" fill="var(--muted)" text-anchor="end">${esc(short(v))}</text>`).join("");
+  const trend=groups.map(k=>{ const g=ps.filter(p=>key(p)===k).sort((a,b)=>t(a.date)-t(b.date)); return g.length>1?`<path d="${g.map((p,i)=>`${i?"L":"M"}${x(p.date).toFixed(1)},${y(p.unit_price_eur).toFixed(1)}`).join(" ")}" fill="none" stroke="${col(k)}" stroke-width="2" opacity=".45"/>`:""; }).join("");
+  const dots=ps.map(p=>{ const tip=`${name(key(p))}${by==="item"?" · "+storeName(p.store):""} · ${niceDate(p.date)}: ${U(p.unit_price_eur)}`;
+    return `<circle cx="${x(p.date).toFixed(1)}" cy="${y(p.unit_price_eur).toFixed(1)}" r="6.5" fill="${col(key(p))}"/><circle cx="${x(p.date).toFixed(1)}" cy="${y(p.unit_price_eur).toFixed(1)}" r="16" fill="transparent" data-tip="${esc(tip)}" style="cursor:pointer"/>`; }).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Unit price over time">${grid}
+   <text x="${L}" y="${H-P+20}" font-size="12" fill="var(--muted)">${esc(niceDate(new Date(t0).toISOString().slice(0,10)))}</text><text x="${W-P}" y="${H-P+20}" font-size="12" fill="var(--muted)" text-anchor="end">${esc(niceDate(new Date(t1).toISOString().slice(0,10)))}</text>
+   ${trend}${dots}</svg>
+   <div class="legend">${groups.map(k=>`<span><i style="background:${col(k)}"></i>${esc(name(k))}</span>`).join("")}</div><p class="sub small">Tap a dot to see its price.</p>`;
 }
-
 /* ===================== ITEMS, SHOPS, PURCHASES ===================== */
 let IF={q:"", bought:false};
 function itemsListHTML(cat){
@@ -1166,7 +1215,7 @@ function itemsListHTML(cat){
 }
 function renderItems(cat){
   setBar(""); const c=cat||"";
-  $("#app").innerHTML=`${topbar("All items","home")}
+  $("#app").innerHTML=`${topbar("Items")}
   <div class="card filters"><input class="t" id="if_q" type="search" placeholder="Search: leche, milk, 牛奶, griego…" value="${esc(IF.q)}" autocomplete="off">
    <div class="row2"><select class="t" id="it_cat" aria-label="Category"><option value="">All categories</option>${S.cats.map(x=>`<option value="${x.id}" ${x.id===c?"selected":""}>${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}</select>
     <label class="checkrow"><input type="checkbox" id="if_bought" ${IF.bought?"checked":""}> Only items I've bought</label></div></div>
@@ -1222,7 +1271,7 @@ function renderPurchases(){
   setBar("");
   const shops=[...new Set(S.purchases.map(p=>p.store))].filter(storeById).sort((a,b)=>storeName(a).localeCompare(storeName(b)));
   const cats=[...new Set(S.purchases.map(p=>(itemById(p.item)||{}).cat).filter(Boolean))];
-  $("#app").innerHTML=`${topbar("All prices","home")}
+  $("#app").innerHTML=`${topbar("Prices")}
   <div class="card filters">
    <input class="t" id="pf_q" type="search" placeholder="Search: item, brand, shop… (any language)" value="${esc(PF.q)}" autocomplete="off">
    <div class="seg" role="group" aria-label="Show" style="margin-top:10px">${[["all","All"],["bought","Bought"],["noted","Noted only"]].map(([k,l])=>`<button data-act="pfkind" data-k="${k}" aria-pressed="${PF.kind===k}">${l}</button>`).join("")}</div>
@@ -1236,11 +1285,19 @@ function renderPurchases(){
 /* ===================== SHOPS ===================== */
 function renderShops(){
   setBar("");
+  const idx=basketIndex(S.purchases.filter(p=>comparable(p) && storeCountry(p.store)===HOME));
   const by={}; for(const st of S.stores){ (by[storeCountry(st.id)]=by[storeCountry(st.id)]||[]).push(st); }
   const n=id=>S.purchases.filter(p=>p.store===id).length;
   const order=Object.keys(by).sort((a,b)=>(a===HOME?-1:b===HOME?1:countryName(a).localeCompare(countryName(b))));
-  $("#app").innerHTML=`${topbar("Shops","home")}<p class="sub">Tap a shop to change its name, kind or country. Prices are only compared between shops in the same country.</p>
-  ${order.map(c=>`<div class="card"><h2 class="sec">${esc(countryName(c))}</h2><div class="list">${by[c].sort((a,b)=>n(b.id)-n(a.id)||a.name.localeCompare(b.name)).map(st=>`<button class="li" data-go="shopedit/${encodeURIComponent(st.id)}"><span><b>${esc(st.name)}</b><br><span class="sub">${esc(SHOP_KINDS[st.type]||"Shop")}</span></span><span class="r">${n(st.id)||""}<small>${n(st.id)?"purchases":""}</small></span></button>`).join("")}</div></div>`).join("")}
+  const cheap=cheapestPerItem();
+  $("#app").innerHTML=`${topbar("Shops")}
+  <div class="card" id="rank"><h2 class="sec">Which shop is cheapest</h2>
+   ${idx.length?`<p class="sub">Each shop's typical price for items you've bought at more than one shop, against your average for the same items.</p><table class="t2">${idx.map(r=>{ const pct=Math.round((r.index-1)*100);
+     return `<tr><td><b>${esc(storeName(r.store))}</b><br><span class="sub small">${r.items} item${r.items===1?"":"s"} compared${r.items<3?" · rough guide":""}</span></td><td class="n" style="color:var(--${pct<=-3?"great":pct>=3?"expensive":"typical"})">${pct===0?"same":pct<0?`${-pct}% cheaper`:`${pct}% pricier`}</td></tr>`; }).join("")}</table>
+     ${cheap.length?`<details class="more"><summary>Cheapest shop for each item (${cheap.length})</summary><div class="list">${cheap.map(x=>`<button class="li" data-go="item/${encodeURIComponent(x.it.id)}"><span><b>${esc(disp(x.it))}</b> <span class="zh">${esc(x.it.zh)}</span><br><span class="sub">${esc(storeName(x.store))}</span></span><span class="r">${esc(fmtUnitPrice(x.med,x.it.basis,unitWord(x.it)))}<small>${x.saving>0?`${Math.round(x.saving*100)}% below the priciest`:""}</small></span></button>`).join("")}</div></details>`:""}`
+   :`<p class="empty">Buy the same items at two or more shops and the comparison appears here.</p>`}</div>
+  ${order.map(c=>`<div class="card"><h2 class="sec">Your shops${order.length>1?` · ${esc(countryName(c))}`:""}</h2><div class="list">${by[c].sort((a,b)=>n(b.id)-n(a.id)||a.name.localeCompare(b.name)).map(st=>`<button class="li" data-go="shopedit/${encodeURIComponent(st.id)}"><span><b>${esc(st.name)}</b><br><span class="sub">${esc(SHOP_KINDS[st.type]||"Shop")}</span></span><span class="r">${n(st.id)||""}<small>${n(st.id)?"prices":""}</small></span></button>`).join("")}</div></div>`).join("")}
+  <p class="sub">Tap a shop to change its name, kind or country. Prices are only compared between shops in the same country.</p>
   <p><button class="btn small" data-act="newshopfromlist">+ Add a shop</button></p>`;
 }
 function renderShopEdit(id){
@@ -1339,10 +1396,10 @@ document.addEventListener("click", async ev=>{
   if(a==="mode"){ F.mode=t.dataset.v; renderForm(F._kind, F.item); return; }
   if(a==="clearform"){ F=blankForm(""); renderForm(F._kind||"log"); return; }
   if(a==="checktolog"){ if(!F.item){ toast("Choose an item first."); return; } F._kind="log"; F._carry=true; F.bought="0"; location.hash="log/"+encodeURIComponent(F.item); return; }
-  if(a==="savepurchase") return savePurchaseForm();
+  if(a==="savepurchase"){ if(t.dataset.bought!==undefined) F.bought=t.dataset.bought; return savePurchaseForm(); }
+  if(a==="tokenhintoff"){ LS.set("gr_tokenhint_off",true); renderHome(); return; }
   if(a==="delpurchase"){ if(!confirm("Delete this price? It can only be undone from GitHub's history.")) return; const id=F.id, item=F.item; try{ await rewritePurchases(rows=>rows.filter(r=>r.id!==id), `Delete purchase ${id}`); toast("Purchase deleted"); F=null; location.hash="item/"+encodeURIComponent(item); }catch(e){ toast(e.message); } return; }
-  if(a==="checkitem"){ F=blankForm(t.dataset.id); F._kind="check"; F._carry=true; const it=itemById(t.dataset.id); F.pack_unit=defaultUnit(it); F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat)?"weight":"pack"; location.hash="check/"+encodeURIComponent(t.dataset.id); return; }
-  if(a==="logitem"){ F=blankForm(t.dataset.id); F._kind="log"; F._carry=true; const it=itemById(t.dataset.id); F.pack_unit=defaultUnit(it); F.mode= it.basis!=="unit" && ["fruit","veg","meat","fish"].includes(it.cat)?"weight":"pack"; location.hash="log/"+encodeURIComponent(t.dataset.id); return; }
+  if(a==="logitem"||a==="checkitem"){ F=blankForm(t.dataset.id); F._kind="add"; F._carry=true; location.hash="add/"+encodeURIComponent(t.dataset.id); return; }
   if(a==="readreceipt") return readReceipt();
   if(a==="resetreceipt"){ RC=null; renderReceipt(); return; }
   if(a==="savereceipt") return saveReceipt();
