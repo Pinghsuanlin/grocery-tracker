@@ -136,6 +136,12 @@ details.more{margin-top:12px} details.more summary{font-weight:600;min-height:36
 .userswitch button{flex:1;border:0;background:transparent;border-radius:9px;padding:8px 10px;font-weight:600;font-size:14px;color:var(--muted)}
 .userswitch button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
 @media (prefers-reduced-motion: no-preference){ .toast{animation:pop .18s ease-out} @keyframes pop{from{opacity:0;transform:translate(-50%,-8px)}to{opacity:1;transform:translate(-50%,0)}} .pricetag .sticker{animation:stick .22s ease-out} @keyframes stick{from{transform:rotate(14deg) scale(1.3);opacity:0}to{transform:rotate(4deg) scale(1);opacity:1}} }
+.mslist{list-style:none;margin:8px 0 0;padding:0}
+.mslist li{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line)}
+.msbtns{display:flex;gap:6px;flex:none}
+[data-act="shopkind"][aria-pressed="true"]{background:var(--accent);color:var(--accent-ink,#fff);border-color:var(--accent)}
+.kindq{display:flex;gap:10px;align-items:flex-start;margin-top:10px;padding:10px 12px;border-radius:10px;background:var(--sunk,rgba(0,0,0,.04));cursor:pointer}
+.kindq input{width:22px;height:22px;flex:none;margin-top:2px}
 </style>
 </head>
 <body>
@@ -552,7 +558,7 @@ function numRow(p){ for(const k of ["pack_count","pack_size","packs","weight","p
 async function sync(){
   if(!cfg.token) return;
   try{
-    await flushQueue();
+    await flushItems(); await flushQueue();
     const root=await ghList(""); const sha=n=>{ const f=root.find(x=>x.name===n && x.type==="file"); return f?f.sha:null; };
     const years = root.some(x=>x.name==="purchases" && x.type==="dir") ? (await ghList("purchases")).filter(x=>x.type==="file" && /^\d{4}\.csv$/.test(x.name)) : [];
     const want=[...["items.json","stores.json","mappings.json","people.json","settings.json","purchases.csv"].map(n=>[n,sha(n)]), ...years.map(x=>[`purchases/${x.name}`, x.sha])].filter(([,s])=>s);
@@ -560,17 +566,20 @@ async function sync(){
     const txt={}; await Promise.all(want.map(async([p,s])=>{ txt[p]=await fetchFile(p,s); }));
     if(!txt["items.json"]||!txt["stores.json"]) throw new Error(`items.json or stores.json is missing in ${cfg.repo}. Upload the grocery-log files first.`);
     S.settings = txt["settings.json"] ? (()=>{ try{ return JSON.parse(txt["settings.json"])||{}; }catch(e){ return {}; } })() : {};
+    const pendShops=LS.get("myshops_pending",null); if(Array.isArray(pendShops)){ S.settings.myShops=pendShops; }
     const items=JSON.parse(txt["items.json"]); S.items=items.items; S.cats=items.categories; S.itemsVersion=items.version||1;
+    for(const it of LS.get("items_pending",[])) if(!S.items.some(x=>x.id===it.id)) S.items.push(it);   // not uploaded yet
     const stores=JSON.parse(txt["stores.json"]); S.stores=stores.stores; S.storesVersion=stores.version||1;
     S.mappings=txt["mappings.json"]?JSON.parse(txt["mappings.json"]):{byStore:{}};
     S.people=Object.assign({...DEFAULT_PEOPLE}, txt["people.json"]?JSON.parse(txt["people.json"]):{});
     rebuildPurchases();
     S.synced=new Date().toISOString(); S.error=null; saveCache();
     if((S.itemsVersion||1)<3 || (S.storesVersion||1)<2) await applyDataUpdates();
+    if(Array.isArray(LS.get("myshops_pending",null))) await setMyShops(LS.get("myshops_pending",[]), "Update your shops");
   }catch(e){ S.error = navigator.onLine ? e.message : "Offline: showing the last saved copy."; }
 }
 async function flushQueue(){ const q=queue(); let i=0; for(;i<q.length;i++){ try{ await appendTo(q[i].path||"purchases.csv", q[i].lines, q[i].message); }catch(e){ break; } } setQueue(q.slice(i)); if(i){ rebuildPurchases(); saveCache(); } }
-window.addEventListener("online",()=>{ flushQueue().then(()=>render()); });
+window.addEventListener("online",()=>{ flushItems().then(()=>flushQueue()).then(()=>render()); });
 async function savePurchases(rows, message){
   const groups={}; for(const r of rows){ const p=yearPath(r.date); (groups[p]=groups[p]||[]).push(rowToLine(r)); }   /* each row goes into its year's file */
   const failed=[]; let err=null;
@@ -598,6 +607,27 @@ async function addStore(name, kind, country){
   const st={id, name, type:kind||"own", keywords:[fold(name)], ...(country&&country!==HOME?{country}:{})};
   await ghUpdate("stores.json", t=>{ const d=t?JSON.parse(t):{version:1,stores:[]}; d.stores.push(st); return JSON.stringify(d,null,1)+"\n"; }, `Add shop ${name}`);
   S.stores.push(st); saveCache(); return st;
+}
+function addItemFast(it){
+  S.items.push(it); saveCache();
+  const pend=LS.get("items_pending",[]); pend.push(it); LS.set("items_pending",pend);
+  flushItems().then(ok=>{ if(!ok) toast(`${disp(it)} is saved on this phone. It uploads when you're online.`); });
+}
+let itemsBusy=null;
+async function flushItems(){
+  if(itemsBusy) return itemsBusy;
+  itemsBusy=(async()=>{
+    const pend=LS.get("items_pending",[]); if(!pend.length) return true; if(!cfg.token) return false;
+    try{
+      await ghUpdate("items.json", t=>{ const d=JSON.parse(t); for(const it of pend){ const i=d.items.findIndex(x=>x.id===it.id); if(i>-1) d.items[i]=it; else d.items.push(it); } return JSON.stringify(d,null,1)+"\n"; },
+        pend.length===1?`Add item ${pend[0].en||pend[0].es}`:`Add ${pend.length} items`);
+      LS.set("items_pending", LS.get("items_pending",[]).filter(x=>!pend.some(p=>p.id===x.id)));
+      return true;
+    }catch(e){ return false; }
+  })();
+  const ok=await itemsBusy; itemsBusy=null;
+  if(ok && LS.get("items_pending",[]).length) return flushItems();   // more were added while uploading
+  return ok;
 }
 async function upsertItem(it){
   await ghUpdate("items.json", t=>{ const d=JSON.parse(t); const i=d.items.findIndex(x=>x.id===it.id); if(i>-1) d.items[i]=it; else d.items.push(it); return JSON.stringify(d,null,1)+"\n"; }, `${S.items.some(x=>x.id===it.id)?"Edit":"Add"} item ${it.en||it.es}`);
@@ -668,6 +698,20 @@ function searchItems(q){
     let s=0; for(const h of hay){ if(h===f) s=Math.max(s,3); else if(h.startsWith(f)) s=Math.max(s,2); else if(h.includes(f)) s=Math.max(s,1); } return s+(isType(it)&&s?0.5:0); };
   return S.items.map(it=>[it,sc(it)]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]||disp(a[0]).localeCompare(disp(b[0]))).map(x=>x[0]).slice(0,40);
 }
+/* ---- your shops: the short list shown when you choose a shop ----
+   settings.myShops in grocery-log/settings.json, shared by both phones. Until you edit it, it's the shops you've used, most used first.
+   Shops you pick from a search or add are added at the end. Without a connection the list is kept on this phone and saved at the next sync. */
+function usedShopsByCount(){ const n={}; for(const p of S.purchases) if(p.store) n[p.store]=(n[p.store]||0)+1; return Object.keys(n).filter(id=>storeById(id)).sort((a,b)=>n[b]-n[a]); }
+function myShops(){ const m=S.settings&&Array.isArray(S.settings.myShops)?S.settings.myShops:null; return (m||usedShopsByCount()).filter(id=>storeById(id)); }
+async function setMyShops(ids, message){
+  const clean=ids.filter((id,i,a)=>a.indexOf(id)===i && storeById(id));
+  S.settings={...S.settings, myShops:clean}; LS.set("myshops_pending", clean); saveCache();
+  if(!cfg.token) return false;
+  try{ await ghUpdate("settings.json", t=>{ let d={}; try{ d=t?JSON.parse(t)||{}:{}; }catch(e){} d.myShops=clean; return JSON.stringify(d,null,1)+"\n"; }, message||"Update your shops");
+    LS.del("myshops_pending"); return true; }
+  catch(e){ return false; }
+}
+function keepShop(id){ const cur=myShops(); if(cur.includes(id)) return Promise.resolve(true); const st=storeById(id); return setMyShops([...cur, id], `Add ${st?st.name:"a shop"} to your shops`); }
 function recentStores(){ const seen=new Set(), out=[]; for(const p of S.purchases.slice().reverse()){ if(p.store && !seen.has(p.store)){ seen.add(p.store); out.push(p.store); } } return out; }
 function storeOptions(sel){
   const rec=recentStores().filter(id=>storeById(id)); const rest=S.stores.filter(s=>!rec.includes(s.id)).sort((a,b)=>a.name.localeCompare(b.name));
@@ -943,25 +987,58 @@ function guessBasis(name){ const f=fold(name); if(/\b(\d+\s*)?(ML|CL|L|LT|LITRO|
 function guessType(name){ const types=S.items.filter(isType); const tk=itemTokens(name); let best=null;
   for(const t of types){ for(const lab of [t.en,t.es]){ const tt=itemTokens(lab); if(tt.length && tt.every(a=>tk.some(b=>b===a||(a.length>=4&&b.startsWith(a)&&b.length-a.length<=2)))) best=best||t; } }
   if(!best && /[\u3400-\u9fff]/.test(name)) best=types.find(t=>t.zh && name.includes(t.zh))||null; return best; }
-function guessCat(name){ const m=matchItem(name, S.items, {}); const it=m&&itemById(m.item); return it? it.cat : "pantry"; }
+const CAT_WORDS={
+ fruit:"APPLE MANZANA BANANA PLATANO PEAR PERA ORANGE NARANJA MANDARIN MANDARINA CLEMENTINA LEMON LIMON LIME LIMA GRAPE UVA STRAWBERR FRESA MANGO KIWI PINEAPPLE PINA MELON SANDIA WATERMELON CHERR CEREZA PEACH MELOCOTON NECTARIN PARAGUAYO PLUM CIRUELA AVOCADO AGUACATE PAPAYA FIG HIGO BLUEBERR ARANDANO RASPBERR FRAMBUESA POMEGRANATE GRANADA LYCHEE LICHI PERSIMMON CAQUI DATE DATIL APRICOT ALBARICOQUE COCONUT COCO GUAVA GUAYABA PITAYA FRUIT FRUTA",
+ veg:"LETTUCE LECHUGA ONION CEBOLLA GARLIC AJO CARROT ZANAHORIA POTATO PATATA CUCUMBER PEPINO ZUCCHINI COURGETTE CALABACIN BROCCOLI BROCOLI CAULIFLOWER COLIFLOR CABBAGE COL REPOLLO SPINACH ESPINACA LEEK PUERRO AUBERGINE EGGPLANT BERENJENA CELERY APIO CORN MAIZ PUMPKIN CALABAZA ASPARAGUS ESPARRAGO ARTICHOKE ALCACHOFA BEAN JUDIA PEA GUISANTE KALE BOK CHOY RADISH RABANO BEET REMOLACHA GINGER JENGIBRE SCALLION CEBOLLETA SPROUT BROTE VEGETABLE VERDURA",
+ meat:"CHICKEN POLLO BEEF TERNERA VACUNO PORK CERDO LAMB CORDERO TURKEY PAVO SAUSAGE SALCHICHA CHORIZO BACON PANCETA MINCE PICADA BURGER HAMBURGUESA STEAK FILETE",
+ fish:"FISH PESCADO SALMON TUNA ATUN COD BACALAO HAKE MERLUZA PRAWN SHRIMP GAMBA LANGOSTINO SQUID CALAMAR MUSSEL MEJILLON CLAM ALMEJA OCTOPUS PULPO SARDINE SARDINA",
+ bakery:"BREAD PAN BAGUETTE CROISSANT BUN BOLLO TOAST TOSTADA",
+ drinks:"JUICE ZUMO SODA REFRESCO BEER CERVEZA COLA TEA TE"};
+const CAT_ZH={fruit:"果蘋香蕉芒莓葡橘柳丁桃李梨奇異鳳梨西瓜櫻酪梨火龍芭樂荔枝龍眼柿柚檸", veg:"菜蔥蒜椒瓜番茄洋蔥蘿蔔馬鈴薯花椰菇筍茄芹玉米南瓜豆芽薑", meat:"雞豬牛羊肉香腸培根", fish:"魚蝦蟹貝花枝章魚蛤"};
+function guessCat(name){
+  const f=fold(name||""); const words=f.split(/[^A-Z]+/).filter(Boolean);
+  for(const [cat,list] of Object.entries(CAT_WORDS)){ const keys=list.split(" "); if(words.some(w=>keys.some(k=>w===k||(k.length>=4&&w.startsWith(k))))) return cat; }
+  if(/[\u3400-\u9fff]/.test(name||"")) for(const [cat,chars] of Object.entries(CAT_ZH)) if([...name].some(ch=>chars.includes(ch))) return cat;
+  const m=matchItem(name, S.items, {}); const it=m&&itemById(m.item); return it? it.cat : "pantry";
+}
 function closeSheet(){ const s=$("#picker"); if(s) s.remove(); const n=$("#newitem"); if(n) n.remove(); }
 function openNewItem(prefill){
   closeSheet();
-  const t=guessType(prefill||""), basis=t?t.basis:guessBasis(prefill||""), cat=t?t.cat:guessCat(prefill||"");
+  let t0=guessType(prefill||""); let cat=t0?t0.cat:guessCat(prefill||""); let catTouched=false, kindTouched=false;
   const sh=document.createElement("div"); sh.className="sheet"; sh.id="newitem"; sh.setAttribute("role","dialog"); sh.setAttribute("aria-label","New item");
   sh.innerHTML=`<div class="sheetcard"><div class="hd"><b style="flex:1">New item</b><button class="iconbtn" data-act="closesheet">Close</button></div>
    <label class="f" for="q_name">Name <span class="sub">(any language)</span></label><input class="t" id="q_name" value="${esc(prefill||"")}" autocomplete="off">
-   <label class="f" for="q_type">Is it a type of…</label><select class="t" id="q_type"><option value="">No, it's its own item</option>${S.items.filter(isType).sort((a,b)=>a.en.localeCompare(b.en)).map(x=>`<option value="${x.id}" ${t&&t.id===x.id?"selected":""}>${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}</select>
-   <div id="q_basiswrap" ${t?'style="display:none"':""}><label class="f">Compare prices</label><div class="seg" role="group" aria-label="Compare prices">${[["kg","per kg"],["L","per litre"],["unit","per piece"]].map(([v,l])=>`<button data-act="qbasis" data-v="${v}" aria-pressed="${basis===v}">${l}</button>`).join("")}</div></div>
+   <label class="f" for="q_cat">Category</label><select class="t" id="q_cat">${S.cats.map(c=>`<option value="${c.id}">${esc(c.en)} · ${esc(c.zh)}</option>`).join("")}</select>
+   <div id="q_kindwrap"></div>
+   <div id="q_basiswrap"><label class="f">Compare prices</label><div class="seg" role="group" aria-label="Compare prices">${[["kg","per kg"],["L","per litre"],["unit","per piece"]].map(([v,l])=>`<button data-act="qbasis" data-v="${v}" aria-pressed="false">${l}</button>`).join("")}</div></div>
    <details class="more"><summary>More details (optional)</summary>
     <div class="row2"><div><label class="f" for="q_es">Español</label><input class="t" id="q_es"></div><div><label class="f" for="q_zh">中文</label><input class="t" id="q_zh"></div></div>
-    <label class="f" for="q_cat">Category</label><select class="t" id="q_cat">${S.cats.map(c=>`<option value="${c.id}" ${cat===c.id?"selected":""}>${esc(c.en)} · ${esc(c.zh)}</option>`).join("")}</select>
+    <label class="f" for="q_type">Group it with <span class="sub">(prices are compared within the group)</span></label><select class="t" id="q_type"></select>
     <label class="f" for="q_unit">Name of one piece <span class="sub">(for "per piece")</span></label><input class="t" id="q_unit" placeholder="piece, roll, wash…">
     <label class="f" for="q_alias">Other names on receipts</label><input class="t" id="q_alias" placeholder="comma-separated"></details>
    <p><button class="btn primary block" data-act="savequick">Add item</button></p></div>`;
-  document.body.appendChild(sh); sh.dataset.basis=basis;
-  $("#q_type").addEventListener("change",e=>{ $("#q_basiswrap").style.display=e.target.value?"none":""; });
-  $("#q_name").focus();
+  document.body.appendChild(sh);
+  const setBasis=b=>{ sh.dataset.basis=b; sh.querySelectorAll('[data-act="qbasis"]').forEach(x=>x.setAttribute("aria-pressed", x.dataset.v===b)); };
+  /* the group question only appears when the name clearly matches a group in the same category (e.g. "flat peaches" → Peaches) */
+  const refresh=()=>{
+    const name=$("#q_name").value.trim();
+    if(!catTouched){ const g=guessType(name); cat=g?g.cat:guessCat(name); $("#q_cat").value=cat; } else cat=$("#q_cat").value;
+    const types=S.items.filter(x=>isType(x)&&x.cat===cat).sort((a,b)=>a.en.localeCompare(b.en));
+    const sel=$("#q_type"); const was=sel.value;
+    const g=guessType(name); const sug=g&&g.cat===cat?g:null;
+    sel.innerHTML=`<option value="">Nothing, it's its own item</option>${types.map(x=>`<option value="${x.id}">${esc(x.en)} · ${esc(x.zh)}</option>`).join("")}`;
+    sel.value = kindTouched ? (types.some(x=>x.id===was)?was:"") : (sug?sug.id:"");
+    const kt=sel.value?itemById(sel.value):null;
+    $("#q_kindwrap").innerHTML = sug ? `<label class="kindq"><input type="checkbox" id="q_kind" ${sel.value===sug.id?"checked":""}> <span>A kind of <b>${esc(sug.en)}</b> <span class="zh">${esc(sug.zh)}</span><br><span class="sub">Its prices are compared with other ${esc(sug.en.toLowerCase())}.</span></span></label>` : "";
+    $("#q_basiswrap").style.display=kt?"none":"";
+    if(!kt && !sh.dataset.basisTouched) setBasis(guessBasis(name)); if(kt) sh.dataset.basis=kt.basis;
+  };
+  sh.addEventListener("click",e=>{ if(e.target===sh) closeSheet(); if(e.target.closest('[data-act="qbasis"]')) sh.dataset.basisTouched="1"; });
+  let tm; $("#q_name").addEventListener("input",()=>{ clearTimeout(tm); tm=setTimeout(refresh,150); });
+  $("#q_cat").addEventListener("change",()=>{ catTouched=true; refresh(); });
+  $("#q_type").addEventListener("change",()=>{ kindTouched=true; refresh(); });
+  sh.addEventListener("change",e=>{ if(e.target.id==="q_kind"){ const g=guessType($("#q_name").value.trim()); kindTouched=true; $("#q_type").value=e.target.checked&&g?g.id:""; refresh(); } });
+  refresh(); $("#q_name").focus();
 }
 function quickItemFromSheet(){
   const name=$("#q_name").value.trim(); if(!name){ toast("Give it a name."); return null; }
@@ -978,20 +1055,30 @@ let shopCb=null;
 function openStorePicker(cb){
   shopCb=cb; closeSheet();
   const sh=document.createElement("div"); sh.className="sheet"; sh.id="picker"; sh.setAttribute("role","dialog"); sh.setAttribute("aria-label","Choose a shop");
-  sh.innerHTML=`<div class="sheetcard"><div class="hd"><input class="t" id="sp_q" type="search" placeholder="Search or type a new shop" autocomplete="off"><button class="iconbtn" data-act="closesheet">Close</button></div><div id="sp_res" class="list"></div></div>`;
+  sh.innerHTML=`<div class="sheetcard"><div class="hd"><input class="t" id="sp_q" type="search" placeholder="Type to find or add a shop" aria-label="Find or add a shop" autocomplete="off"><button class="iconbtn" data-act="closesheet">Close</button></div><div id="sp_res" class="list"></div></div>`;
   sh.addEventListener("click",e=>{ if(e.target===sh) closeSheet(); });
   document.body.appendChild(sh); storeList(); $("#sp_q").focus();
 }
 function guessCountry(){ const cur=(F&&F.currency)||(RC&&RC.currency)||"EUR"; return {TWD:"TW",JPY:"JP",GBP:"GB",USD:"US"}[cur]||HOME; }
 function storeList(){
-  const q=fold($("#sp_q").value.trim()); const rec=recentStores().filter(id=>storeById(id));
-  const all=S.stores.slice().sort((a,b)=>a.name.localeCompare(b.name));
-  const list=q? all.filter(st=>fold(st.name).includes(q)||(st.keywords||[]).some(k=>fold(k).includes(q))) : [...rec.map(storeById), ...all.filter(st=>!rec.includes(st.id))];
-  const exact=q && S.stores.some(st=>fold(st.name)===q);
-  $("#sp_res").innerHTML = (!q&&rec.length?`<p class="sub" style="margin:4px 0">Recent first</p>`:"") + list.slice(0,40).map(st=>`<button class="li" data-act="pickshop" data-id="${esc(st.id)}"><span><b>${esc(st.name)}</b><br><span class="sub">${esc(SHOP_KINDS[st.type]||"Shop")}${storeCountry(st.id)!==HOME?` · ${esc(countryName(storeCountry(st.id)))}`:""}</span></span><span></span></button>`).join("")
-    + (q&&!exact?`<div class="card" style="margin-top:10px"><b>Add “${esc($("#sp_q").value.trim())}” as a new shop</b>
+  const raw=$("#sp_q").value.trim(); const q=fold(raw); const mine=myShops();
+  const row=(st,note)=>`<button class="li" data-act="pickshop" data-id="${esc(st.id)}"><span><b>${esc(st.name)}</b><br><span class="sub">${esc(SHOP_KINDS[st.type]||"Shop")}${storeCountry(st.id)!==HOME?` · ${esc(countryName(storeCountry(st.id)))}`:""}${note?` · ${esc(note)}`:""}</span></span><span></span></button>`;
+  let html="";
+  if(!q){
+    html += mine.length ? `<p class="sub" style="margin:6px 0 2px">Your shops</p>${mine.map(id=>row(storeById(id))).join("")}`
+                        : `<p class="sub" style="margin:6px 0">No shops yet. Type a shop's name above to find it or add it.</p>`;
+    html += `<p class="sub" style="margin:12px 0 0">Not in the list? Type its name above. That finds shops the app already knows (Lidl, Dia, Carrefour…) or adds a new one. <button class="linkbtn" data-act="editmyshops">Edit your list</button></p>`;
+  } else {
+    const all=S.stores.filter(st=>fold(st.name).includes(q)||(st.keywords||[]).some(k=>fold(k).includes(q)));
+    all.sort((a,b)=>(mine.includes(b.id)-mine.includes(a.id)) || a.name.localeCompare(b.name));
+    html += all.length ? all.slice(0,30).map(st=>row(st, mine.includes(st.id)?"Your shop":"")).join("") : `<p class="sub" style="margin:6px 0">No shop called “${esc(raw)}” yet.</p>`;
+    const exact=S.stores.some(st=>fold(st.name)===q);
+    if(!exact) html += `<div class="card newshop" style="margin-top:10px"><b>Add “${esc(raw)}” as a new shop</b>
+       <p class="sub" style="margin:8px 0 4px">What kind of shop?</p><div class="chips" role="group" aria-label="Kind of shop">${NEW_SHOP_KINDS.map(([k,l],i)=>`<button class="btn small" data-act="shopkind" data-kind="${k}" aria-pressed="${i===0}">${l}</button>`).join("")}</div>
        <label class="f" for="sp_country">Country</label><select class="t" id="sp_country">${COUNTRIES.map(([c,l])=>`<option value="${c}" ${c===guessCountry()?"selected":""}>${l}</option>`).join("")}</select>
-       <p class="sub" style="margin:8px 0 4px">What kind of shop?</p><div class="chips">${NEW_SHOP_KINDS.map(([k,l])=>`<button class="btn small" data-act="newshop" data-kind="${k}">${l}</button>`).join("")}</div></div>`:"");
+       <p style="margin:10px 0 0"><button class="btn primary block" data-act="newshop" data-kind="${NEW_SHOP_KINDS[0][0]}">Add shop</button></p></div>`;
+  }
+  $("#sp_res").innerHTML=html;
 }
 function itemFormHTML(it){
   return `<div class="row2"><div><label class="f" for="i_en">English</label><input class="t" id="i_en" value="${esc(it.en)}"></div><div><label class="f" for="i_es">Español</label><input class="t" id="i_es" value="${esc(it.es)}"></div></div>
@@ -1346,6 +1433,9 @@ function renderSettings(first){
     <p><button class="btn primary block" data-act="savecfg">Connect and sync</button></p><p id="s_msg" class="err" role="alert"></p></div>
   ${!first?`<div class="card"><h2 class="sec">Names</h2><div class="row2"><div><label class="f" for="n1">Person 1</label><input class="t" id="n1" value="${esc(S.people.user1||"")}" maxlength="24"></div><div><label class="f" for="n2">Person 2</label><input class="t" id="n2" value="${esc(S.people.user2||"")}" maxlength="24"></div></div>
      <p><button class="btn block" data-act="savenames">Save names</button></p></div>
+   <div class="card" id="myshops"><h2 class="sec">Your shops</h2><p class="sub">These are listed when you choose a shop, in this order. Shared by both phones. Shops you pick from a search or add go to the end; remove the ones you don't use. Removing doesn't delete the shop or its prices.</p>
+     ${myShops().length?`<ol class="mslist">${myShops().map((id,i,arr)=>`<li><span>${esc(storeById(id).name)}</span><span class="msbtns"><button class="btn small" data-act="msup" data-i="${i}" aria-label="Move ${esc(storeById(id).name)} up" ${i===0?"disabled":""}>↑</button><button class="btn small" data-act="msdown" data-i="${i}" aria-label="Move ${esc(storeById(id).name)} down" ${i===arr.length-1?"disabled":""}>↓</button><button class="btn small" data-act="msdel" data-i="${i}" aria-label="Remove ${esc(storeById(id).name)}">Remove</button></span></li>`).join("")}</ol>`:`<p class="sub">No shops yet.</p>`}
+     <div class="links"><button class="btn" data-act="msadd">Add a shop</button></div></div>
    <div class="card"><h2 class="sec">Spending</h2><p class="sub">Prices dated before this date count as noted only, so spending starts here. Shared by both phones; nothing in your data changes, and you can move or clear it any time.</p>
      <label class="f" for="sp_from">Count spending from</label><div style="display:flex;gap:8px"><input class="t" id="sp_from" type="date" value="${esc(S.settings.spendFrom||"")}" max="${localISO()}"><button class="btn small" data-act="spfromtoday">Today</button></div>
      <div class="links"><button class="btn" data-act="savespfrom">Save</button>${S.settings.spendFrom?`<button class="btn" data-act="clearspfrom">Count everything</button>`:""}</div></div>
@@ -1383,11 +1473,16 @@ document.addEventListener("click", async ev=>{
     try{ await upsertItem(it); toast(`Added ${disp(it)}`); closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
   if(a==="quicknew"){ return openNewItem($("#pk_q").value.trim()); }
   if(a==="qbasis"){ const sh=$("#newitem"); sh.dataset.basis=t.dataset.v; sh.querySelectorAll('[data-act="qbasis"]').forEach(b=>b.setAttribute("aria-pressed", b.dataset.v===t.dataset.v)); return; }
-  if(a==="savequick"){ const it=quickItemFromSheet(); if(!it) return; const cb=pickCb; try{ await upsertItem(it); toast(`Added ${disp(it)}`); closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
+  if(a==="savequick"){ const it=quickItemFromSheet(); if(!it) return; const cb=pickCb; closeSheet(); addItemFast(it); toast(`Added ${disp(it)}`); if(cb) cb(it.id); return; }
   if(a==="pickstore"){ return openStorePicker(id=>{ F.store=id; renderForm(F._kind, F.item); }); }
   if(a==="pickrstore"){ return openStorePicker(id=>{ RC.store=id; const mem=(S.mappings.byStore||{})[id]||{}; for(const l of RC.lines){ if(!l.item||l.how==="guess"){ const m=matchItem(l.name,S.items,mem); if(m&&m.how==="remembered"){ l.item=m.item; l.how="remembered"; } } } renderReceipt(); }); }
-  if(a==="pickshop"){ const cb=shopCb; closeSheet(); if(cb) cb(t.dataset.id); return; }
-  if(a==="newshop"){ const name=$("#sp_q").value.trim(); if(!name) return; const cb=shopCb; t.disabled=true; try{ const st=await addStore(name, t.dataset.kind, $("#sp_country").value); toast(`Added ${st.name}`); closeSheet(); if(cb) cb(st.id); }catch(e){ toast(e.message); t.disabled=false; } return; }
+  if(a==="pickshop"){ const cb=shopCb; closeSheet(); keepShop(t.dataset.id); if(cb) cb(t.dataset.id); return; }
+  if(a==="shopkind"){ document.querySelectorAll("[data-act=shopkind]").forEach(b=>b.setAttribute("aria-pressed", b===t)); const go=document.querySelector("[data-act=newshop]"); if(go) go.dataset.kind=t.dataset.kind; return; }
+  if(a==="editmyshops"){ closeSheet(); location.hash="settings"; setTimeout(()=>{ const c=$("#myshops"); if(c) c.scrollIntoView(); },60); return; }
+  if(a==="msup"||a==="msdown"||a==="msdel"){ const l=myShops(), i=+t.dataset.i; if(a==="msdel") l.splice(i,1); else { const j=a==="msup"?i-1:i+1; if(j<0||j>=l.length) return; [l[i],l[j]]=[l[j],l[i]]; }
+    const ok=await setMyShops(l, a==="msdel"?"Remove a shop from your shops":"Reorder your shops"); renderSettings(false); const c=$("#myshops"); if(c) c.scrollIntoView(); if(!ok) toast("Saved on this phone. It uploads at the next sync."); return; }
+  if(a==="msadd"){ return openStorePicker(async id=>{ await keepShop(id); renderSettings(false); const c=$("#myshops"); if(c) c.scrollIntoView(); }); }
+  if(a==="newshop"){ const name=$("#sp_q").value.trim(); if(!name) return; const cb=shopCb; t.disabled=true; try{ const st=await addStore(name, t.dataset.kind, $("#sp_country").value); toast(`Added ${st.name}`); closeSheet(); keepShop(st.id); if(cb) cb(st.id); }catch(e){ toast(e.message); t.disabled=false; } return; }
   if(a==="newitem"){ const q=$("#pk_q")?$("#pk_q").value:""; return openNewItem(q); }
   if(a==="newitemstandalone"){ pickCb=id=>{ location.hash="item/"+encodeURIComponent(id); }; return openNewItem(($("#h_q")&&$("#h_q").value)||($("#if_q")&&$("#if_q").value)||""); }
   if(a==="savenewitem"){ const it=itemFromForm(null); if(!it) return; try{ await upsertItem(it); toast("Item added"); const cb=pickCb; closeSheet(); if(cb) cb(it.id); }catch(e){ toast(e.message); } return; }
